@@ -1,3 +1,9 @@
+![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
+![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-lightgrey.svg)
+![YOLOv8](https://img.shields.io/badge/YOLOv8-Ultralytics-orange)
+![Qt](https://img.shields.io/badge/UI-PySide6%20(Qt)-green)
+![License](https://img.shields.io/badge/License-Personal-red)
+![Status](https://img.shields.io/badge/Status-Production%20Ready-brightgreen)
 # VisionForge Pro: Smart Dataset Collector
 
 VisionForge Pro is a professional-grade dataset collection tool designed specifically for Computer Vision workflows. It supports ML engineers in capturing high-quality images of pills and small objects. The system includes built-in object detection for automatic cropping and supports hardware zoom control via the UVC standard.
