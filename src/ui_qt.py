@@ -41,7 +41,7 @@ class MainWindow(QMainWindow):
         self.frame_count = 0
         
         # 🔥 State สำหรับ Zoom (เริ่มต้นที่ 1.0)
-        self.current_zoom = 1.0
+        self.current_zoom = 0
 
         self.apply_styles()
 
@@ -202,7 +202,7 @@ class MainWindow(QMainWindow):
         btn_minus = QPushButton("-")
         btn_minus.setProperty("class", "ZoomBtn")
         btn_minus.setFixedSize(40, 35)
-        btn_minus.clicked.connect(lambda: self.change_zoom(-0.1)) # ลดทีละ 0.1
+        btn_minus.clicked.connect(lambda: self.change_zoom(-1)) # ลดทีละ 0.1
         
         # ป้ายแสดงค่า
         self.lbl_zoom_val = QLabel(f"{self.current_zoom:.1f}x")
@@ -214,7 +214,7 @@ class MainWindow(QMainWindow):
         btn_plus = QPushButton("+")
         btn_plus.setProperty("class", "ZoomBtn")
         btn_plus.setFixedSize(40, 35)
-        btn_plus.clicked.connect(lambda: self.change_zoom(0.1)) # เพิ่มทีละ 0.1
+        btn_plus.clicked.connect(lambda: self.change_zoom(1)) # เพิ่มทีละ 0.1
         
         row_zoom.addStretch()
         row_zoom.addWidget(btn_minus)
@@ -244,11 +244,17 @@ class MainWindow(QMainWindow):
 
     # 🔥 ฟังก์ชันใหม่สำหรับเปลี่ยนค่า Zoom
     def change_zoom(self, delta):
-        new_val = self.current_zoom + delta
-        # จำกัดค่าระหว่าง 1.0 ถึง 4.0
-        new_val = max(1.0, min(new_val, 4.0))
-        self.current_zoom = new_val
-        self.lbl_zoom_val.setText(f"{self.current_zoom:.1f}x")
+        # สลับค่าระหว่าง 1 และ 2 เท่านั้น
+        if self.current_zoom == 1:
+            self.current_zoom = 2
+        else:
+            self.current_zoom = 1
+
+        # แสดงผล
+        if self.current_zoom == 1:
+            self.lbl_zoom_val.setText("IN")
+        else:
+            self.lbl_zoom_val.setText("OUT")
 
     def create_recording_card(self):
         layout = self.create_card("DATASET CONFIG")
