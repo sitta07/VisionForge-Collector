@@ -1,25 +1,42 @@
-import os
+import torch
 from ultralytics import YOLO
-from config import ONNX_MODEL_PATH, FALLBACK_MODEL
+import os
 
 class ObjectDetector:
     def __init__(self):
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        print(f"🚀 AI Device: {self.device.upper()}")
         self.model = None
-        self.model_name = "None"
 
-    def load_model(self):
-        path = ONNX_MODEL_PATH if os.path.exists(ONNX_MODEL_PATH) else FALLBACK_MODEL
+    def load_model(self, model_path):
         try:
-            # 👉 แก้ตรงนี้: เพิ่ม task='detect' เพื่อปิด Warning
-            self.model = YOLO(path, task='detect') 
-            
-            self.model_name = os.path.basename(path)
-            return True, self.model_name
+            self.model = YOLO(model_path, task='detect')
+            self.model.to(self.device)
+            return True, os.path.basename(model_path)
         except Exception as e:
             return False, str(e)
 
     def predict(self, frame, conf=0.5):
-        if self.model:
-            # verbose=False to keep terminal clean
-            return self.model(frame, verbose=False, conf=conf)
-        return []
+        if self.model is None: return None
+        
+        # Run YOLO
+        results = self.model(frame, verbose=False, conf=conf, stream=False)
+        
+        if not results: return None
+
+        # 🎯 Logic: หาตัวที่ Confidence สูงที่สุดแค่ตัวเดียว
+        best_box = None
+        highest_conf = -1
+
+        for r in results:
+            for box in r.boxes:
+                current_conf = box.conf[0].item()
+                if current_conf > highest_conf:
+                    highest_conf = current_conf
+                    best_box = box
+        
+        return best_box # คืนค่าเป็น Box Object ตัวเดียว
+    
+    def get_available_models(self, folder="models"):
+        if not os.path.exists(folder): os.makedirs(folder)
+        return [f for f in os.listdir(folder) if f.endswith(('.pt', '.onnx'))]

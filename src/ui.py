@@ -1,233 +1,274 @@
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+import customtkinter as ctk
+from tkinter import filedialog, messagebox, simpledialog
 import cv2
 import PIL.Image, PIL.ImageTk
 import os
 import time
 
-# Import Modules
+# Modules
 import config
 from camera import CameraManager
 from detector import ObjectDetector
+from image_utils import ImageProcessor
 
-class DataCollectorApp:
-    def __init__(self, window, window_title):
-        self.window = window
-        self.window.title(window_title)
-        self.window.geometry("1280x800")
+# Setup Theme
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("dark-blue")
+
+class DataCollectorApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("VisionForge: Smart Collector")
+        self.geometry("1400x850")
         
-        # --- Modules ---
+        # --- Backend ---
         self.camera = CameraManager()
         self.detector = ObjectDetector()
+        self.processor = ImageProcessor()
+        self.presets = config.load_presets()
         
         # --- State ---
         self.is_recording = False
-        self.save_root_dir = config.DEFAULT_DATA_ROOT
+        self.save_dir = config.DEFAULT_DATA_ROOT
         self.count_saved = 0
-        self.zoom_level = 1.0
-        self.presets = config.load_presets()
-
-        # --- Init UI & Backend ---
-        self.create_ui()
-        self.init_backend()
-
-    def init_backend(self):
-        # Load AI
-        self.status_var.set("⏳ Loading Model...")
-        self.window.update()
-        success, msg = self.detector.load_model()
-        if success:
-            self.status_var.set(f"✅ Model: {msg}")
-        else:
-            self.status_var.set(f"❌ Error: {msg}")
+        self.frame_count = 0
         
-        # Start Camera
-        self.start_camera_stream(0)
+        # --- UI Layout ---
+        self.grid_columnconfigure(0, weight=3) # Video
+        self.grid_columnconfigure(1, weight=1) # Controls
+        self.grid_rowconfigure(0, weight=1)
 
-    def start_camera_stream(self, idx):
-        if self.camera.start(idx):
-            self.update_video_feed()
-        else:
-            messagebox.showerror("Error", f"Cannot open Camera {idx}")
-
-    def create_ui(self):
-        # Grid Setup
-        self.window.columnconfigure(0, weight=1)
-        self.window.columnconfigure(1, weight=0)
-        self.window.rowconfigure(0, weight=1)
-
-        # Left: Video
-        self.video_frame = tk.Frame(self.window, bg="black")
-        self.video_frame.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
-        self.canvas = tk.Canvas(self.video_frame, bg="black")
-        self.canvas.pack(fill="both", expand=True)
-
-        # Right: Controls
-        self.controls_frame = tk.Frame(self.window, width=320, bg="#f5f5f5")
-        self.controls_frame.grid(row=0, column=1, sticky="ns", padx=10, pady=10)
-        self.controls_frame.pack_propagate(False)
-
-        self._build_controls()
-
-    def _build_controls(self):
-        lbl_style = {"font": ("Segoe UI", 10, "bold"), "bg": "#f5f5f5"}
+        self.setup_ui()
         
-        # 1. Output Path
-        tk.Label(self.controls_frame, text="📂 Output Folder", **lbl_style).pack(anchor="w", pady=(10,0))
-        self.lbl_path = tk.Label(self.controls_frame, text=self.save_root_dir[-40:], fg="gray", bg="#f5f5f5")
-        self.lbl_path.pack(anchor="w", padx=10)
-        tk.Button(self.controls_frame, text="Change Folder...", command=self.change_folder).pack(fill="x", padx=10, pady=5)
+        # --- Start ---
+        self.refresh_models()
+        self.camera.start(0)
+        self.update_loop()
+
+    def setup_ui(self):
+        # 1. Video Panel (Left)
+        self.video_frame = ctk.CTkFrame(self, fg_color="#050505", corner_radius=0)
+        self.video_frame.grid(row=0, column=0, sticky="nsew")
+        self.lbl_video = ctk.CTkLabel(self.video_frame, text="Loading Camera...", font=("Arial", 16))
+        self.lbl_video.pack(fill="both", expand=True)
+
+        # 2. Sidebar (Right)
+        self.sidebar = ctk.CTkFrame(self, width=320, corner_radius=0, fg_color="#1a1a1a")
+        self.sidebar.grid(row=0, column=1, sticky="nsew")
+        self.sidebar.pack_propagate(False)
+
+        # --- Top: Preview ---
+        self.preview_box = ctk.CTkFrame(self.sidebar, height=200, fg_color="#2b2b2b")
+        self.preview_box.pack(fill="x", padx=10, pady=10)
+        self.preview_box.pack_propagate(False)
+        ctk.CTkLabel(self.preview_box, text="LIVE PREVIEW (SAVE OUTPUT)", font=("Arial", 10, "bold")).pack(pady=2)
+        self.lbl_preview = ctk.CTkLabel(self.preview_box, text="WAITING...", text_color="gray")
+        self.lbl_preview.pack(expand=True)
+
+        # --- Scrollable Controls ---
+        self.scroll = ctk.CTkScrollableFrame(self.sidebar, fg_color="transparent")
+        self.scroll.pack(fill="both", expand=True, padx=5, pady=5)
+
+        # Group: Model & Cam
+        self.add_header("🧠 SYSTEM")
+        self.combo_model = ctk.CTkComboBox(self.scroll, values=[], command=self.load_selected_model)
+        self.combo_model.pack(fill="x", pady=5)
+        ctk.CTkButton(self.scroll, text="⚡ TRIGGER AUTOFOCUS", command=self.camera.trigger_autofocus, fg_color="#333").pack(fill="x", pady=2)
+
+        # Group: Image & Presets
+        self.add_header("🎨 IMAGE & PRESETS")
         
-        ttk.Separator(self.controls_frame, orient='horizontal').pack(fill='x', pady=10)
+        # Preset Controls
+        row_preset = ctk.CTkFrame(self.scroll, fg_color="transparent")
+        row_preset.pack(fill="x", pady=2)
+        self.combo_preset = ctk.CTkComboBox(row_preset, values=list(self.presets.keys()), command=self.apply_preset)
+        self.combo_preset.pack(side="left", fill="x", expand=True, padx=(0,5))
+        ctk.CTkButton(row_preset, text="💾", width=40, command=self.save_current_preset).pack(side="right")
+        ctk.CTkButton(row_preset, text="🗑", width=40, fg_color="#c0392b", command=self.delete_preset).pack(side="right", padx=2)
 
-        # 2. Camera
-        tk.Label(self.controls_frame, text="📹 Camera Source", **lbl_style).pack(anchor="w")
-        cam_frame = tk.Frame(self.controls_frame, bg="#f5f5f5")
-        cam_frame.pack(fill="x", padx=10)
-        self.cam_combo = ttk.Combobox(cam_frame, values=["Cam 0", "Cam 1", "Cam 2"], width=10)
-        self.cam_combo.current(0)
-        self.cam_combo.pack(side="left", fill="x", expand=True)
-        tk.Button(cam_frame, text="🔄 Reload", command=self.reload_camera).pack(side="right", padx=5)
+        # Sliders
+        self.sl_zoom = self.add_slider("Zoom", 1.0, 4.0, 1.0)
+        self.sl_bright = self.add_slider("Brightness", -100, 100, 0)
+        self.sl_cont = self.add_slider("Contrast", 0.5, 3.0, 1.0)
 
-        ttk.Separator(self.controls_frame, orient='horizontal').pack(fill='x', pady=10)
+        # Group: Recording
+        self.add_header("⏺ RECORDING SETUP")
+        self.entry_class = ctk.CTkEntry(self.scroll, placeholder_text="Class Name")
+        self.entry_class.pack(fill="x", pady=5)
+        
+        # Folder
+        row_path = ctk.CTkFrame(self.scroll, fg_color="transparent")
+        row_path.pack(fill="x", pady=5)
+        self.btn_path = ctk.CTkButton(row_path, text="📂 FOLDER", width=80, command=self.change_folder)
+        self.btn_path.pack(side="left")
+        self.lbl_path = ctk.CTkLabel(row_path, text=".../Desktop", font=("Arial", 10))
+        self.lbl_path.pack(side="right", padx=5)
 
-        # 3. Class & Preset
-        tk.Label(self.controls_frame, text="🏷️ Class Name", **lbl_style).pack(anchor="w")
-        self.entry_name = tk.Entry(self.controls_frame, font=("Segoe UI", 11))
-        self.entry_name.pack(fill="x", padx=10, pady=5)
-        self.entry_name.insert(0, "default_obj")
+        # Interval Slider
+        self.sl_interval = self.add_slider("Save Every N Frames", 1, 60, 5) # Default 5
+        self.sl_conf = self.add_slider("Confidence Threshold", 0.1, 1.0, 0.6)
 
-        tk.Label(self.controls_frame, text="⚙️ Presets", **lbl_style).pack(anchor="w", pady=(10,0))
-        self.preset_combo = ttk.Combobox(self.controls_frame, values=list(self.presets.keys()))
-        self.preset_combo.pack(fill="x", padx=10, pady=5)
-        self.preset_combo.bind("<<ComboboxSelected>>", self.apply_preset)
+        # --- Bottom: Record Button ---
+        self.btn_record = ctk.CTkButton(self.sidebar, text="START RECORDING", height=50, 
+                                        fg_color="#e74c3c", hover_color="#c0392b", 
+                                        font=("Arial", 16, "bold"), command=self.toggle_record)
+        self.btn_record.pack(fill="x", padx=10, pady=20, side="bottom")
 
-        btn_preset = tk.Frame(self.controls_frame, bg="#f5f5f5")
-        btn_preset.pack(fill="x", padx=10)
-        tk.Button(btn_preset, text="Save Preset", command=self.save_preset_ui).pack(side="left", expand=True, fill="x")
-        tk.Button(btn_preset, text="Del Preset", command=self.delete_preset_ui).pack(side="right", expand=True, fill="x")
+    def add_header(self, text):
+        ctk.CTkLabel(self.scroll, text=text, anchor="w", font=("Arial", 12, "bold"), text_color="#3498db").pack(fill="x", pady=(15, 2))
 
-        # 4. Zoom & Conf
-        tk.Label(self.controls_frame, text="🔍 Zoom", **lbl_style).pack(anchor="w", pady=(15,0))
-        self.scale_zoom = tk.Scale(self.controls_frame, from_=1.0, to=3.0, resolution=0.1, orient="horizontal", command=self.set_zoom)
-        self.scale_zoom.set(1.0)
-        self.scale_zoom.pack(fill="x", padx=10)
+    def add_slider(self, label, min_v, max_v, default):
+        ctk.CTkLabel(self.scroll, text=label, anchor="w", font=("Arial", 11)).pack(fill="x")
+        sl = ctk.CTkSlider(self.scroll, from_=min_v, to=max_v)
+        sl.set(default)
+        sl.pack(fill="x", pady=(0, 10))
+        return sl
 
-        tk.Label(self.controls_frame, text="🎯 Confidence", **lbl_style).pack(anchor="w")
-        self.scale_conf = tk.Scale(self.controls_frame, from_=0.1, to=1.0, resolution=0.05, orient="horizontal")
-        self.scale_conf.set(0.6)
-        self.scale_conf.pack(fill="x", padx=10)
-
-        # 5. Record
-        self.btn_record = tk.Button(self.controls_frame, text="⏺ START RECORDING", bg="#ff4444", fg="white", font=("Segoe UI", 12, "bold"), height=2, command=self.toggle_record)
-        self.btn_record.pack(fill="x", padx=10, pady=20)
-
-        self.status_var = tk.StringVar(value="Ready")
-        tk.Label(self.controls_frame, textvariable=self.status_var, bg="#ddd", height=2).pack(side="bottom", fill="x")
-
-    # --- Logic Connectors ---
-    def update_video_feed(self):
+    # --- Logic ---
+    def update_loop(self):
         frame = self.camera.get_frame()
         if frame is not None:
-            # 1. Digital Zoom
-            frame = self._apply_zoom(frame)
-            display = frame.copy()
+            # 1. Image FX (Zoom/Bright/Cont)
+            zoom = self.sl_zoom.get()
+            bright = self.sl_bright.get()
+            cont = self.sl_cont.get()
             
-            # 2. AI & Record
-            if self.is_recording:
-                self._process_recording(frame, display)
+            processed = self.processor.apply_filters(frame, zoom=zoom, bright=bright, contrast=cont)
+            display = processed.copy()
             
-            # 3. Render to Canvas
-            img = PIL.ImageTk.PhotoImage(image=PIL.Image.fromarray(cv2.cvtColor(display, cv2.COLOR_BGR2RGB)))
-            self.canvas.create_image(0, 0, image=img, anchor=tk.NW)
-            self.canvas.image = img # Keep ref
-            
-        self.window.after(10, self.update_video_feed)
+            # Draw Crosshair
+            self.processor.draw_crosshair(display)
 
-    def _apply_zoom(self, frame):
-        if self.zoom_level <= 1.0: return frame
-        h, w = frame.shape[:2]
-        nw, nh = int(w/self.zoom_level), int(h/self.zoom_level)
-        x1, y1 = (w-nw)//2, (h-nh)//2
-        return cv2.resize(frame[y1:y1+nh, x1:x1+nw], (w, h))
+            # 2. AI Detect
+            conf_thresh = self.sl_conf.get()
+            best_box = self.detector.predict(processed, conf=conf_thresh)
+            
+            latest_crop = None
 
-    def _process_recording(self, raw, display):
-        class_name = self.entry_name.get().strip()
-        save_dir = os.path.join(self.save_root_dir, class_name)
-        os.makedirs(save_dir, exist_ok=True)
-        
-        # Predict
-        results = self.detector.predict(raw, conf=self.scale_conf.get())
-        
-        for r in results:
-            for box in r.boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            if best_box is not None: # ต้องเช็ค is not None เสมอ
+                x1, y1, x2, y2 = map(int, best_box.xyxy[0])
+                conf = best_box.conf[0].item()
+                cls_id = int(best_box.cls[0]) # ดึง ID ออกมาก่อน
                 
-                # Save Crop
-                crop = raw[y1:y2, x1:x2]
-                if crop.size != 0:
-                    fname = f"{class_name}_{int(time.time()*1000)}.jpg"
-                    cv2.imwrite(os.path.join(save_dir, fname), crop)
-                    self.count_saved += 1
-                    self.status_var.set(f"⏺ Saved: {self.count_saved} | {fname}")
+                # 🔥 FIX CRASH: ใช้ .get() เพื่อกัน error ถ้าหาชื่อไม่เจอ
+                class_name = self.detector.model.names.get(cls_id, f"ID_{cls_id}")
+                label = f"{class_name} {conf:.2f}"
+                
+                # Draw Box
+                cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(display, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                
+                # Crop Logic
+                crop = processed[y1:y2, x1:x2]
+                if crop.size > 0:
+                    latest_crop = self.processor.remove_background(crop)
+                    
+                    # Save Logic
+                    if self.is_recording:
+                        self.frame_count += 1
+                        interval = int(self.sl_interval.get())
+                        if self.frame_count % interval == 0:
+                            self.save_image(latest_crop)
+
+            # 3. UI Update
+            self.show_video(display)
+            self.show_preview(latest_crop)
+
+        self.after(20, self.update_loop)
+
+    def show_video(self, img):
+        # Resize to fit window height logic (Basic)
+        h, w = img.shape[:2]
+        win_h = self.video_frame.winfo_height()
+        if win_h > 100:
+            scale = win_h / h
+            img = cv2.resize(img, (int(w*scale), int(h*scale)))
+        
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        ctk_img = ctk.CTkImage(PIL.Image.fromarray(img_rgb), size=(img.shape[1], img.shape[0]))
+        self.lbl_video.configure(image=ctk_img, text="")
+
+    def show_preview(self, img):
+        if img is None: return
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        ctk_img = ctk.CTkImage(PIL.Image.fromarray(img_rgb), size=(180, 180)) # Fixed Box
+        self.lbl_preview.configure(image=ctk_img, text="")
+
+    def save_image(self, img):
+        cname = self.entry_class.get().strip() or "unknown"
+        path = os.path.join(self.save_dir, cname)
+        os.makedirs(path, exist_ok=True)
+        
+        fname = f"{int(time.time()*1000)}.png"
+        cv2.imwrite(os.path.join(path, fname), img)
+        self.count_saved += 1
+        self.btn_record.configure(text=f"REC • {self.count_saved}")
 
     # --- Actions ---
     def toggle_record(self):
         if not self.is_recording:
-            if not self.entry_name.get().strip():
+            if not self.entry_class.get().strip():
                 messagebox.showwarning("Warning", "Enter Class Name first!")
                 return
             self.is_recording = True
             self.count_saved = 0
-            self.btn_record.config(text="⏹ STOP", bg="black")
-            self.entry_name.config(state="disabled")
+            self.btn_record.configure(text="STOP", fg_color="#333")
+            self.entry_class.configure(state="disabled")
+            self.sl_interval.configure(state="disabled") # Lock interval while recording
         else:
             self.is_recording = False
-            self.btn_record.config(text="⏺ RECORD", bg="#ff4444")
-            self.entry_name.config(state="normal")
+            self.btn_record.configure(text="START RECORDING", fg_color="#e74c3c")
+            self.entry_class.configure(state="normal")
+            self.sl_interval.configure(state="normal")
             messagebox.showinfo("Done", f"Saved {self.count_saved} images.")
 
-    def reload_camera(self):
-        idx = int(self.cam_combo.get().split(" ")[1])
-        self.start_camera_stream(idx)
+    def refresh_models(self):
+        models = self.detector.get_available_models()
+        if models:
+            self.combo_model.configure(values=models)
+            self.combo_model.set(models[0])
+            self.load_selected_model(models[0])
+
+    def load_selected_model(self, name):
+        path = os.path.join("models", name)
+        success, msg = self.detector.load_model(path)
+        print(f"Model: {msg}")
 
     def change_folder(self):
         p = filedialog.askdirectory()
         if p:
-            self.save_root_dir = p
-            self.lbl_path.config(text=p[-40:])
+            self.save_dir = p
+            self.lbl_path.configure(text=f".../{os.path.basename(p)}")
 
-    def set_zoom(self, val): self.zoom_level = float(val)
-
-    # --- Presets (Using Config Module) ---
-    def save_preset_ui(self):
-        name = self.entry_name.get()
-        if not name: return
-        self.presets[f"Preset_{name}"] = {"zoom": self.scale_zoom.get(), "conf": self.scale_conf.get()}
-        config.save_presets(self.presets)
-        self.preset_combo['values'] = list(self.presets.keys())
-        messagebox.showinfo("Saved", f"Preset_{name}")
-
-    def delete_preset_ui(self):
-        name = self.preset_combo.get()
-        if name in self.presets:
-            del self.presets[name]
+    # --- Preset Logic ---
+    def save_current_preset(self):
+        name = simpledialog.askstring("Save Preset", "Enter Preset Name:")
+        if name:
+            self.presets[name] = {
+                "zoom": self.sl_zoom.get(),
+                "bright": self.sl_bright.get(),
+                "cont": self.sl_cont.get(),
+                "interval": self.sl_interval.get(),
+                "conf": self.sl_conf.get()
+            }
             config.save_presets(self.presets)
-            self.preset_combo['values'] = list(self.presets.keys())
-            self.preset_combo.set("")
+            self.combo_preset.configure(values=list(self.presets.keys()))
+            self.combo_preset.set(name)
 
-    def apply_preset(self, event):
-        name = self.preset_combo.get()
+    def apply_preset(self, name):
         if name in self.presets:
             d = self.presets[name]
-            self.scale_zoom.set(d.get("zoom", 1.0))
-            self.scale_conf.set(d.get("conf", 0.6))
-            self.zoom_level = d.get("zoom", 1.0)
+            self.sl_zoom.set(d.get("zoom", 1.0))
+            self.sl_bright.set(d.get("bright", 0))
+            self.sl_cont.set(d.get("cont", 1.0))
+            self.sl_interval.set(d.get("interval", 5))
+            self.sl_conf.set(d.get("conf", 0.6))
 
-    def on_closing(self):
-        """Clean up resources before closing"""
-        if self.camera:
-            self.camera.stop()
-        self.window.destroy()
-        print("👋 App Closed Successfully")
+    def delete_preset(self):
+        name = self.combo_preset.get()
+        if name in self.presets:
+            if messagebox.askyesno("Confirm", f"Delete {name}?"):
+                del self.presets[name]
+                config.save_presets(self.presets)
+                self.combo_preset.configure(values=list(self.presets.keys()))
+                self.combo_preset.set("")
