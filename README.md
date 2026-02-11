@@ -1,22 +1,22 @@
 # VisionForge Pro: Smart Dataset Collector
 
-VisionForge Pro is a professional-grade dataset collection tool designed specifically for Computer Vision workflows. It supports ML engineers in capturing high-quality images of pills and small objects. The system includes built-in AI detection for automatic cropping and supports hardware zoom control via the UVC standard.
+VisionForge Pro is a professional-grade dataset collection tool designed specifically for Computer Vision workflows. It supports ML engineers in capturing high-quality images of pills and small objects. The system includes built-in object detection for automatic cropping and supports hardware zoom control via the UVC standard.
 
-## 🛠 Features
-- **AI-Powered Detection:** Uses YOLOv8 for real-time object detection.
-- **Hardware Zoom Control:** Controls hardware zoom via UVC. Supports levels 1–10 (including -100 offset for YoloCam S3 compatibility).
-- **Pill Enhanced Preset:** Advanced image processing mode (LAB Color Space + CLAHE) to enhance pill imprints and surface texture without altering original colors.
-- **High-Fidelity UI:** Built with PySide6 (Qt) with multi-threading support for smooth video performance.
-- **Production Recording:** Automated image capture with structured folder management based on class name.
+## Features
+- AI-powered detection using YOLOv8 for real-time object detection
+- Hardware zoom control via UVC (supports levels 1–10, including -100 offset for YoloCam S3 compatibility)
+- Pill Enhanced preset (LAB Color Space + CLAHE) to enhance pill imprints and surface texture without altering original colors
+- High-performance UI built with PySide6 (Qt) with multi-threading support
+- Automated recording system with structured folder management by class name
 
 ## System Requirements
-- **Operating System:** Linux (Ubuntu 22.04 LTS recommended) or Windows 10/11
-- **Python:** 3.10 or higher
-- **Dependencies:**
-  - PySide6 (UI framework)
-  - opencv-python-headless (Image processing)
-  - ultralytics (YOLOv8 core)
-  - numpy (Data processing)
+- Operating System: Linux (Ubuntu 22.04 LTS recommended) or Windows 10/11
+- Python: 3.10 or higher
+- Dependencies:
+  - PySide6
+  - opencv-python-headless
+  - ultralytics
+  - numpy
 
 ## Installation
 
@@ -34,39 +34,68 @@ source venv/bin/activate  # Linux
 pip install -r requirements.txt
 ```
 
-## 🖥 Usage
+### 3. Prepare AI Models
+
+Create a models folder in the project root:
+
+```bash
+mkdir models
+```
+
+Download YOLOv8n ONNX model:
+
+```bash
+cd models
+wget https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.onnx
+```
+
+Alternatively, you may place any custom YOLOv8 ONNX model inside the models directory.
+
+Expected structure:
+
+```
+VisionForge-Collector/
+├── models/
+│   ├── yolov8n.onnx
+│   └── your_custom_model.onnx
+```
+
+The application automatically detects available models from this directory.
+
+## Usage
 
 ### Run from Source Code
 ```bash
 ./run_app.sh
 or
-python src/main.py 
+python src/main.py
 ```
 
 ### Interface Guide
-- **System Control:** Select a YOLO (.pt) model from the dropdown and click Force Autofocus if the image is blurry.
-- **Image Settings:** Adjust Zoom Level (1–10) for hardware control. Select "Pill Enhanced" preset for capturing pills with imprints.
-- **Dataset Config:** Enter a class name and choose an output directory.
-- **Recording:** Click Start Recording. The system will automatically crop and save detected objects.
+- System Control: Select a YOLO model (.onnx) from the dropdown and use Force Autofocus if needed
+- Image Settings: Adjust Zoom Level for hardware control and select "Pill Enhanced" preset when capturing pill surfaces
+- Dataset Config: Enter class name and choose output directory
+- Recording: Click Start Recording to automatically crop and save detected objects
 
 ## Project Structure
 ```
 VisionForge-Collector/
 ├── src/
-│   ├── main.py          # Application entry point
-│   ├── ui_qt.py         # UI logic (PySide6)
-│   ├── camera.py        # Hardware interface (UVC/OpenCV)
-│   ├── detector.py      # AI inference (YOLOv8)
-│   └── image_utils.py   # Image processing algorithms
-├── models/              # YOLO model files (.pt)
-├── requirements.txt     # Required Python libraries
-├── README.md            # Documentation
-└── run_app.sh           # Production launcher (Linux)
+│   ├── main.py
+│   ├── ui_qt.py
+│   ├── camera.py
+│   ├── detector.py
+│   └── image_utils.py
+├── models/
+├── requirements.txt
+├── README.md
+└── run_app.sh
 ```
 
-## Production Build (Executable)
+## Production Build
 
-To build a standalone executable for desktop use without running through VS Code:
+To build a standalone executable:
+
 ```bash
 pyinstaller --name "VisionForgePro" \
             --windowed \
@@ -76,10 +105,10 @@ pyinstaller --name "VisionForgePro" \
             src/main.py
 ```
 
-After a successful build, place the `models/` folder at the same directory level as the `VisionForgePro` executable inside the `dist/` folder.
+After building, place the models folder at the same directory level as the VisionForgePro executable inside the dist folder.
 
-## 📄 License
+## License
 
-© 2025 Sitta Boonkaew. All rights reserved.
+© 2026 Sitta Boonkaew. All rights reserved.
 
-This project is a personal project .
+This project is a personal project.
