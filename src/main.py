@@ -1,12 +1,17 @@
-from ui import DataCollectorApp
-import customtkinter as ctk
+import sys
+from PySide6.QtWidgets import QApplication
+from ui_qt import MainWindow
 
 if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    
+    # Optional: Fix High DPI scaling
     try:
         from ctypes import windll
         windll.shcore.SetProcessDpiAwareness(1)
     except:
         pass
 
-    app = DataCollectorApp()
-    app.mainloop()
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
