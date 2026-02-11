@@ -3,8 +3,6 @@
 # 1. เข้าไปยัง Directory ของโปรแกรม (ป้องกันปัญหา Relative Path)
 cd "$(dirname "$0")"
 
-# 2. Activate Virtual Environment (ใช้ Path ที่แน่นอน)
-source ./venv/bin/activate
 
 # 3. ตั้งค่า PYTHONPATH เพื่อให้หาโมดูลใน src เจอ
 export PYTHONPATH=$PYTHONPATH:$(pwd)/src
