@@ -67,8 +67,33 @@ class ImageProcessor:
         return frame
 
     def remove_background(self, img):
-        if img is None or img.size == 0: return img
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, self.lower_green, self.upper_green)
-        mask_inv = cv2.bitwise_not(mask)
-        return cv2.bitwise_and(img, img, mask=mask_inv)
+            if img is None or img.size == 0: return img
+            
+            # 1. แปลงเป็น HSV และสร้าง Mask ของพื้นหลังสีเขียว
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+            bg_mask = cv2.inRange(hsv, self.lower_green, self.upper_green)
+            
+            # 2. กลับค่า Mask (ให้ Object เป็นสีขาว, พื้นหลังเป็นดำ)
+            # ตอนนี้ตรงโลโก้จะเป็นสีดำ (รูโหว่) เพราะมันเป็นสีเขียว
+            object_mask = cv2.bitwise_not(bg_mask)
+            
+            # 3. หา Contours (เส้นขอบ) ของวัตถุ
+            contours, _ = cv2.findContours(object_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            if not contours:
+                return img # ถ้าหาไม่เจอ ให้คืนรูปเดิมไปก่อน
+                
+            # 4. หา Contour ที่ใหญ่ที่สุด (สมมติว่าเป็นกล่องยา)
+            largest_contour = max(contours, key=cv2.contourArea)
+            
+            # 5. สร้าง Mask อันใหม่ที่สะอาดขึ้นมา
+            clean_mask = np.zeros_like(bg_mask)
+            
+            # 6. วาด Contour ที่ใหญ่ที่สุดลงไป แล้ว "ระบายสีทับให้เต็ม (Fill)"
+            # -1 คือการระบายสีทึบ สิ่งนี้จะช่วย "อุดรู" ตรงโลโก้ต้นไม้ครับ
+            cv2.drawContours(clean_mask, [largest_contour], -1, 255, thickness=cv2.FILLED)
+            
+            # 7. ตัดภาพด้วย Mask ใหม่ที่อุดรูแล้ว
+            result = cv2.bitwise_and(img, img, mask=clean_mask)
+            
+            return result
