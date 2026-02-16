@@ -1,102 +1,172 @@
-import sqlite3
-import time
-import numpy as np
 import os
+import sqlite3
+import numpy as np
+import faiss
+
 
 class DatabaseManager:
     def __init__(self, db_path):
-        """
-        db_path: รับ Path มาจาก config.py (ตามโหมดที่เลือก)
-        """
         self.db_path = db_path
-        self.ensure_directory()
-        self.connect_db()
+        self.conn = sqlite3.connect(self.db_path)
+        self.cursor = self.conn.cursor()
 
-    def ensure_directory(self):
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        self._create_table()
 
-    def connect_db(self):
-        # check_same_thread=False เพื่อให้ GUI Thread เรียกใช้ได้ไม่พัง
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        
-        # 🚀 PERFORMANCE TUNING: WAL Mode = เร็ว + ปลอดภัย (Production Grade)
-        self.conn.execute("PRAGMA journal_mode=WAL")  
-        self.conn.execute("PRAGMA synchronous=NORMAL")
-        self.create_tables()
+        # FAISS
+        self.index = None
+        self.id_map = []
 
-    def create_tables(self):
-        # สร้าง Table เดียวแต่ใช้ได้ครอบจักรวาล
-        query = """
-        CREATE TABLE IF NOT EXISTS drugs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            vector BLOB,          -- เก็บ Vector เป็น Binary
-            img_path TEXT,
-            timestamp REAL
-        );
-        -- สร้าง Index ที่ชื่อยา เพื่อให้การ Group/Count เร็วจัดๆ
-        CREATE INDEX IF NOT EXISTS idx_drug_name ON drugs(name);
-        """
-        self.conn.executescript(query)
+        self.load_faiss_index()
+
+    # ==============================
+    # DB SETUP
+    # ==============================
+
+    def _create_table(self):
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS drugs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                embedding BLOB,
+                image_path TEXT
+            )
+        """)
         self.conn.commit()
 
-    def add_entry(self, name, vector_np, img_path):
-        """เพิ่มข้อมูลยาใหม่"""
-        try:
-            # แปลง Numpy -> Bytes (BLOB)
-            if vector_np is not None and len(vector_np) > 0:
-                vector_blob = vector_np.astype(np.float32).tobytes()
-            else:
-                vector_blob = None
+        # 🔥 ตรวจ schema ปัจจุบัน
+        self.cursor.execute("PRAGMA table_info(drugs)")
+        columns = [row[1] for row in self.cursor.fetchall()]
 
-            with self.conn: # Auto-commit transaction
-                self.conn.execute(
-                    "INSERT INTO drugs (name, vector, img_path, timestamp) VALUES (?, ?, ?, ?)",
-                    (name, vector_blob, img_path, time.time())
-                )
-            return True
-        except Exception as e:
-            print(f"❌ DB Insert Error: {e}")
-            return False
+        if "embedding" not in columns:
+            print("⚠️ Adding missing embedding column...")
+            self.cursor.execute("ALTER TABLE drugs ADD COLUMN embedding BLOB")
 
-    def delete_class(self, class_name):
-        """ลบยาทั้ง Class (เช่น ลบ Paracetamol ทั้งหมด)"""
-        try:
-            with self.conn:
-                cursor = self.conn.execute("DELETE FROM drugs WHERE name = ?", (class_name,))
-                return cursor.rowcount
-        except Exception as e:
-            print(f"❌ DB Delete Error: {e}")
-            return 0
+        if "image_path" not in columns:
+            print("⚠️ Adding missing image_path column...")
+            self.cursor.execute("ALTER TABLE drugs ADD COLUMN image_path TEXT")
+
+        self.conn.commit()
+
+
+    # ==============================
+    # ADD ENTRY
+    # ==============================
+
+    def add_entry(self, name, vector, image_path):
+        if vector is not None:
+            vector = vector.astype("float32")
+            emb_blob = vector.tobytes()
+        else:
+            emb_blob = None
+
+        self.cursor.execute(
+            "INSERT INTO drugs (name, embedding, image_path) VALUES (?, ?, ?)",
+            (name, emb_blob, image_path)
+        )
+        self.conn.commit()
+
+        # rebuild FAISS index
+        self.load_faiss_index()
+
+    # ==============================
+    # DELETE CLASS
+    # ==============================
+
+    def delete_class(self, name):
+        self.cursor.execute("DELETE FROM drugs WHERE name = ?", (name,))
+        self.conn.commit()
+
+        self.load_faiss_index()
+
+    # ==============================
+    # STATS
+    # ==============================
 
     def get_stats(self):
-        """ดึงสถิติสำหรับหน้า Analytics (Count by Name)"""
-        try:
-            cursor = self.conn.cursor()
-            # ใช้ SQL Group By ซึ่งเร็วกว่า Python Loop ล้านเท่า
-            cursor.execute("SELECT name, COUNT(*) FROM drugs GROUP BY name ORDER BY COUNT(*) DESC")
-            return cursor.fetchall() # Returns [(name, count), ...]
-        except Exception as e:
-            print(f"❌ Stats Error: {e}")
-            return []
+        self.cursor.execute("""
+            SELECT name, COUNT(*) 
+            FROM drugs 
+            GROUP BY name
+        """)
+        return self.cursor.fetchall()
+
+    # ==============================
+    # LOAD FAISS INDEX
+    # ==============================
+
+    def load_faiss_index(self):
+        self.cursor.execute("SELECT name, embedding FROM drugs WHERE embedding IS NOT NULL")
+        rows = self.cursor.fetchall()
+
+        vectors = []
+        self.id_map = []
+
+        for name, emb_blob in rows:
+            vec = np.frombuffer(emb_blob, dtype=np.float32)
+            if vec.size > 0:
+                vectors.append(vec)
+                self.id_map.append(name)
+
+        if len(vectors) == 0:
+            self.index = None
+            return
+
+        vectors = np.vstack(vectors).astype("float32")
+
+        dim = vectors.shape[1]
+
+        # Cosine similarity = Inner Product + normalize
+        self.index = faiss.IndexFlatIP(dim)
+
+        # Normalize for cosine similarity
+        faiss.normalize_L2(vectors)
+
+        self.index.add(vectors)
+
+        print(f"✅ FAISS index loaded with {len(vectors)} vectors")
+
+    # ==============================
+    # SEARCH (FAST)
+    # ==============================
+
+    def search(self, query_vector, threshold=0.75):
+        if self.index is None:
+            return None, 0.0
+
+        vec = np.array([query_vector]).astype("float32")
+        faiss.normalize_L2(vec)
+
+        scores, indices = self.index.search(vec, 1)
+
+        score = float(scores[0][0])
+        idx = int(indices[0][0])
+
+        if idx < 0:
+            return None, score
+
+        if score >= threshold:
+            return self.id_map[idx], score
+
+        return None, score
+    # ใน class DatabaseManager
 
     def get_all_vectors(self):
-        """โหลด Vector ขึ้น RAM เพื่อทำ Live Search"""
-        try:
-            cursor = self.conn.cursor()
-            cursor.execute("SELECT name, vector FROM drugs WHERE vector IS NOT NULL")
-            rows = cursor.fetchall()
-            
-            data = []
-            for name, blob in rows:
-                if blob:
-                    vec = np.frombuffer(blob, dtype=np.float32)
-                    data.append({'name': name, 'vector': vec})
-            return data
-        except Exception as e:
-            print(f"❌ Load Vector Error: {e}")
-            return []
-    
+        """
+        Return all entries with embeddings as list of dicts:
+        [{'name': name, 'vector': np.array([...], dtype=float32)}, ...]
+        """
+        self.cursor.execute("SELECT name, embedding FROM drugs WHERE embedding IS NOT NULL")
+        rows = self.cursor.fetchall()
+        data = []
+        for name, emb in rows:
+            vec = np.frombuffer(emb, dtype=np.float32)  # assuming embedding stored as BLOB
+            data.append({"name": name, "vector": vec})
+        return data
+
+
+    # ==============================
+    # CLOSE
+    # ==============================
+
     def close(self):
-        if self.conn:
-            self.conn.close()
+        self.conn.close()

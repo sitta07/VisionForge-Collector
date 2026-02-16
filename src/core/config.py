@@ -37,10 +37,10 @@ MODE_PATHS = {
         
         # --- AI Models ---
         "yolo_model": "yolo_boxes.pt",
-        "rec_model": None,  # 🔥 กล่องยาไม่มี ArcFace ให้ใส่ None ไว้ (ห้ามลบคีย์ทิ้ง)
+        "rec_model": os.path.join(BASE_DIR, "models", "best_model_arcface.pth"),  # 🔥 กล่องยาไม่มี ArcFace ให้ใส่ None ไว้ (ห้ามลบคีย์ทิ้ง)
         
         # --- Settings ---
-        "use_rembg": False
+        "use_rembg": True
     }
 }
 
