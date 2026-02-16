@@ -37,7 +37,7 @@ os.environ["QT_LOGGING_RULES"] = "qt.text.font.db=false"
 class AdminStation(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VisionForge: Admin Station (Universal ArcFace)")
+        self.setWindowTitle("VisionForge: Admin Station (Specific Models)")
         self.resize(1600, 950)
 
         # 1. Hardware & AI
@@ -250,16 +250,13 @@ class AdminStation(QMainWindow):
         
         self.populate_dropdown(self.combo_db, db_folder, [".db"], default_db_name)
         
+        # Create Default DB if empty
         if self.combo_db.currentText() in ["(empty folder)", "(no files)"]:
-            print(f"📝 Creating default database: {default_db_name}")
             default_db_path = os.path.join(db_folder, default_db_name)
-            
             if self.db_manager:
                 try: self.db_manager.close()
                 except: pass
-            
             self.db_manager = DatabaseManager(default_db_path)
-            
             self.combo_db.blockSignals(True)
             self.combo_db.clear()
             self.combo_db.addItem(default_db_name)
@@ -273,10 +270,17 @@ class AdminStation(QMainWindow):
         default_yolo = os.path.basename(self.current_config.get("yolo_model", "best.onnx"))
         self.populate_dropdown(self.combo_yolo, weights_folder, [".pt", ".onnx"], default_yolo)
         
-        # 3. ArcFace (🔥 Enabled for BOTH Modes)
-        # ไม่มีการเช็ค if mode == "pills" อีกต่อไป
-        default_arcface = os.path.basename(self.current_config.get("rec_model", "pill_model.pth"))
-        self.populate_dropdown(self.combo_arcface, weights_folder, [".pth"], default_arcface)
+        # 3. ArcFace (🔥 FIXED: Specific Model Selection)
+        # -----------------------------------------------------------
+        if mode == "pills":
+            target_model = "best_pill.pth"
+        else:
+            target_model = "best_boxes.pth"
+            
+        print(f"🎯 Target ArcFace: {target_model}")
+        
+        # Populate and force select
+        self.populate_dropdown(self.combo_arcface, weights_folder, [".pth"], target_model)
 
         # 4. Trigger Load
         self.on_db_change(self.combo_db.currentText())
@@ -289,7 +293,6 @@ class AdminStation(QMainWindow):
     # --- Dropdown Handlers ---
     def on_db_change(self, fname):
         if not fname or "empty" in fname or "no files" in fname: 
-            print(f"⚠️ No database file selected")
             self.db_manager = None
             return
         
@@ -310,7 +313,6 @@ class AdminStation(QMainWindow):
             
         except Exception as e:
             print(f"❌ Database connection failed: {e}")
-            QMessageBox.critical(self, "Database Error", f"Failed to connect:\n{e}")
             self.db_manager = None
 
     def on_yolo_change(self, fname):
@@ -323,7 +325,6 @@ class AdminStation(QMainWindow):
             print(f"👁️ YOLO Loaded: {fname}")
 
     def on_arcface_change(self, fname):
-        # 🔥 ลบเงื่อนไขที่ห้ามใช้ใน Boxes mode ออก
         if not fname or "no files" in fname or "not used" in fname: return
         
         folder = os.path.join(BASE_DIR, "model_weights")
@@ -351,13 +352,8 @@ class AdminStation(QMainWindow):
             frame = self.camera.get_frame()
             if frame is None: return
             
-            # --- ❌ จุดที่แก้: ใช้ frame ทำทุกอย่างเพื่อความแม่นยำ ---
-            # processed = self.processor.apply_filters(frame)
-            # display = processed.copy()
-            
-            display = frame.copy() # ใช้ภาพสดแสดงผลเลย หรือจะใช้ processed ก็ได้แต่ต้อง predict frame
-            
-            # (ถ้าต้องการ Crosshair ให้วาดใส่ display ตรงนี้)
+            # ใช้ frame ต้นฉบับเพื่อความแม่นยำ
+            display = frame.copy()
             self.processor.draw_crosshair(display)
 
             h, w = display.shape[:2]
@@ -365,7 +361,7 @@ class AdminStation(QMainWindow):
             # 3. ตรวจจับ
             conf = self.sl_conf.value() / 100.0
             
-            # 🔥 CHANGE 1: Predict จาก frame ต้นฉบับ
+            # Predict จาก frame ต้นฉบับ
             best_box = self.detector.predict(frame, conf=conf)
             
             self.best_crop_rgba = None
@@ -375,21 +371,18 @@ class AdminStation(QMainWindow):
             if best_box is not None:
                 x1, y1, x2, y2 = map(int, best_box.xyxy[0])
                 
-                # 🔥 CHANGE 2: เพิ่ม Padding (เผื่อขอบ) ให้ภาพ Reference สมบูรณ์ขึ้น
-                # Admin Station ควรเก็บภาพแบบเห็นเต็มเม็ด ไม่ชิดขอบเกินไป
+                # Padding Logic
                 pad = 15
                 y1_p = max(0, y1 - pad)
                 x1_p = max(0, x1 - pad)
                 y2_p = min(h, y2 + pad)
                 x2_p = min(w, x2 + pad)
 
-                # ตัดภาพจากพิกัดที่เผื่อขอบแล้ว
+                # ตัดภาพ
                 raw_crop = frame[y1_p:y2_p, x1_p:x2_p]
                 
                 if raw_crop.size > 0:
-                    # No Rembg - Standard BGRA
                     rgba = cv2.cvtColor(raw_crop, cv2.COLOR_BGR2BGRA)
-                    
                     self.best_crop_rgba = rgba
                     
                     if not self.recording_active:
@@ -415,7 +408,6 @@ class AdminStation(QMainWindow):
                     if self.recording_active:
                         self.video_frames_buffer.append(raw_crop)
 
-                # วาด Box ให้ตรงกับที่ตัด (วาดกรอบ Padding หรือกรอบจริงก็ได้)
                 cv2.rectangle(display, (x1, y1), (x2, y2), status_color, 2)
                 cv2.putText(display, f"Conf: {conf:.2f}", (x1, y1-10), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)

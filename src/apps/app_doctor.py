@@ -1,3 +1,9 @@
+"""
+AI SMART TECH - Modern Vision System
+Card-Based UI with Smooth Interactions + FIXED FLICKERING BOXES
+Version: 4.1 - Anti-Flicker Update
+"""
+
 import sys
 import os
 import time
@@ -5,393 +11,919 @@ import cv2
 import numpy as np
 import torch
 from torchvision import transforms
+from typing import Optional, Dict, List
+import logging
+from collections import defaultdict
 
-# --- 📦 AI Libs (No Rembg) ---
-from ultralytics import YOLO 
+# Suppress warnings
+logging.getLogger('ultralytics').setLevel(logging.ERROR)
+os.environ["QT_LOGGING_RULES"] = "qt.text.font.db=false"
+os.environ['YOLO_VERBOSE'] = 'False'
 
-# --- 🖥️ GUI Libs ---
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                               QHBoxLayout, QLabel, QPushButton, QFrame, 
-                               QMessageBox, QSlider, QGroupBox)
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QImage, QPixmap
+from ultralytics import YOLO
 
-# --- 🔌 Core Logic ---
-# Add project root to sys.path
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QFrame, QSlider, QGroupBox, QScrollArea,
+    QGridLayout
+)
+from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Property
+from PySide6.QtGui import QImage, QPixmap, QColor, QPalette, QFont, QPainter, QPen
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from src.core.config import MODE_PATHS, BASE_DIR
 
-# Handle Imports safely
 try:
     from src.core.camera import CameraManager
     from src.core.detector import ObjectDetector
     from src.core.image_utils import ImageProcessor
     from src.core.database import DatabaseManager
-    from src.model_arch.pill_model import PillModel 
+    from src.model_arch.pill_model import PillModel
 except ImportError as e:
     print(f"⚠️ Core Import Error: {e}")
     sys.exit(1)
 
-os.environ["QT_LOGGING_RULES"] = "qt.text.font.db=false"
 
-class AdminStation(QMainWindow):
+class DetectionTracker:
+    """ป้องกันการกระพริบด้วย temporal smoothing"""
+    
+    def __init__(self, memory_frames: int = 5, min_stable_frames: int = 1):
+        self.memory_frames = memory_frames
+        self.min_stable_frames = min_stable_frames
+        self.detections = {}  # name -> {count: int, frames_seen: int, last_seen_time: float, last_bbox: tuple}
+        self.current_frame_time = time.time()
+    
+    def update(self, detected_items: Dict[str, int], detected_bboxes: Dict[str, tuple]):
+        """อัพเดต detection history และกรอง noise"""
+        self.current_frame_time = time.time()
+        
+        # อัพเดต items ที่เจอในเฟรมนี้
+        for name, count in detected_items.items():
+            if name not in self.detections:
+                self.detections[name] = {
+                    'count': count,
+                    'frames_seen': 1,
+                    'last_seen_time': self.current_frame_time,
+                    'last_bbox': detected_bboxes.get(name)
+                }
+            else:
+                self.detections[name]['count'] = count
+                self.detections[name]['frames_seen'] = min(self.detections[name]['frames_seen'] + 1, 10)  # cap at 10
+                self.detections[name]['last_seen_time'] = self.current_frame_time
+                if name in detected_bboxes:
+                    self.detections[name]['last_bbox'] = detected_bboxes[name]
+        
+        # ลด frames_seen ของ items ที่ไม่เจอในเฟรมนี้
+        names_to_remove = []
+        for name in self.detections:
+            if name not in detected_items:
+                self.detections[name]['frames_seen'] -= 1
+                
+                # ลบถ้าไม่เห็นนานเกินไป
+                if self.detections[name]['frames_seen'] <= -self.memory_frames:
+                    names_to_remove.append(name)
+        
+        for name in names_to_remove:
+            del self.detections[name]
+    
+    def get_stable_detections(self) -> Dict[str, int]:
+        """คืนค่าเฉพาะ detections ที่มั่นคง (เห็นมากพอ)"""
+        stable = {}
+        for name, data in self.detections.items():
+            # แสดงเฉพาะ items ที่เห็นมากกว่า min_stable_frames หรือเคยเห็นมั่นคงมาก่อน
+            if data['frames_seen'] >= self.min_stable_frames:
+                stable[name] = max(0, data['count'])
+        return stable
+    
+    def get_bbox(self, name: str) -> Optional[tuple]:
+        """คืนค่า bbox ล่าสุดของ item"""
+        if name in self.detections:
+            return self.detections[name]['last_bbox']
+        return None
+
+
+class DetectionCard(QFrame):
+    """Modern card widget - ปรับให้เล็กลงเพื่อลง Grid 3 คอลัมน์"""
+    
+    def __init__(self, name: str, count: int, image: Optional[QPixmap] = None):
+        super().__init__()
+        self.item_name = name
+        self.item_count = count
+        self.is_selected = False
+        
+        # ปรับขนาดใหม่ให้ลงตัวกับ 3 คอลัมน์ (125x130)
+        self.setFixedSize(125, 130) 
+        self.setCursor(Qt.PointingHandCursor)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5) 
+        layout.setSpacing(3)
+        
+        # Image container - เตี้ยลงเพื่อประหยัดพื้นที่
+        self.image_container = QFrame()
+        self.image_container.setFixedSize(115, 65) 
+        self.image_container.setStyleSheet("background-color: #f8f9fa; border-radius: 6px;")
+        
+        img_layout = QVBoxLayout(self.image_container)
+        img_layout.setContentsMargins(2, 2, 2, 2)
+        
+        self.lbl_image = QLabel()
+        self.lbl_image.setAlignment(Qt.AlignCenter)
+        
+        if image:
+            # Scale ภาพให้เล็กลงตาม container
+            scaled = image.scaled(110, 60, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.lbl_image.setPixmap(scaled)
+        else:
+            self.lbl_image.setText("📦")
+            self.lbl_image.setStyleSheet("font-size: 24px;")
+        
+        img_layout.addWidget(self.lbl_image)
+        layout.addWidget(self.image_container)
+        
+        # Name - กระชับตัวอักษร
+        self.lbl_name = QLabel(name.upper())
+        self.lbl_name.setAlignment(Qt.AlignCenter)
+        self.lbl_name.setStyleSheet("font-size: 10px; font-weight: bold; color: #444;")
+        layout.addWidget(self.lbl_name)
+        
+        # Count Badge - เล็กลงแต่เด่น
+        self.lbl_count = QLabel(f"×{count}")
+        self.lbl_count.setAlignment(Qt.AlignCenter)
+        self.lbl_count.setFixedHeight(20)
+        self.lbl_count.setStyleSheet("""
+            background-color: #E3F2FD;
+            color: #1976D2;
+            font-size: 11px;
+            font-weight: 800;
+            border-radius: 10px;
+        """)
+        layout.addWidget(self.lbl_count)
+        
+        self.update_style()
+    
+    def set_image(self, pixmap: QPixmap):
+        """Update card image"""
+        scaled = pixmap.scaled(100, 70, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.lbl_image.setPixmap(scaled)
+    
+    def set_selected(self, selected: bool):
+        """Toggle selection state"""
+        self.is_selected = selected
+        self.update_style()
+    
+    def toggle_selection(self):
+        """Toggle selection on/off"""
+        self.is_selected = not self.is_selected
+        self.update_style()
+        return self.is_selected
+    
+    def update_style(self):
+        """Update card appearance based on state"""
+        if self.is_selected:
+            self.setStyleSheet("""
+                DetectionCard {
+                    background-color: white;
+                    border: 3px solid #1976D2;
+                    border-radius: 10px;
+                }
+            """)
+            self.lbl_count.setStyleSheet("""
+                background-color: #1976D2;
+                color: white;
+                font-size: 13px;
+                font-weight: bold;
+                border-radius: 12px;
+                padding: 3px 10px;
+            """)
+        else:
+            self.setStyleSheet("""
+                DetectionCard {
+                    background-color: white;
+                    border: 2px solid #e0e0e0;
+                    border-radius: 10px;
+                }
+                DetectionCard:hover {
+                    border: 2px solid #bbb;
+                }
+            """)
+            self.lbl_count.setStyleSheet("""
+                background-color: #E3F2FD;
+                color: #1976D2;
+                font-size: 13px;
+                font-weight: bold;
+                border-radius: 12px;
+                padding: 3px 10px;
+            """)
+    
+    def mousePressEvent(self, event):
+        """Handle click event"""
+        self.clicked()
+    
+    def clicked(self):
+        """Emit click signal (to be connected)"""
+        pass
+
+
+class ModernVisionStation(QMainWindow):
+    """Modern card-based vision system with anti-flicker"""
+    
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VisionForge: Inference Station (Pure Crop Mode)")
-        self.resize(1400, 850)
-
-        # 1. Hardware & AI Setup
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"🚀 Processing Device: {self.device}")
+        self.setWindowTitle("AI SMART TECH | Vision System")
+        self.resize(1600, 900)
         
+        # Hardware & AI
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.camera = CameraManager()
-        self.detector = ObjectDetector() 
+        self.detector = ObjectDetector()
         self.processor = ImageProcessor()
         
-        # --- ❌ REMOVED REMBG SESSION ---
-        # No background removal init here. Pure Speed.
-
-        # ArcFace Transform
         self.arcface_transform = transforms.Compose([
-            transforms.ToPILImage(), 
+            transforms.ToPILImage(),
             transforms.Resize((224, 224)),
-            transforms.ToTensor(), 
+            transforms.ToTensor(),
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         ])
         self.arcface_model = None
-
-        # 2. State
+        
+        # State
         self.db_manager = None
         self.current_mode = "pills"
-        self.current_embedding = None
-        self.best_crop_rgba = None
-
-        # 3. UI & Start
-        self.apply_styles()
-        self.init_ui()
-        self.camera.start(0)
+        self.selected_item_name = None
+        self.last_detection_time = time.time()
+        self.detection_interval = 0.15
         
-        # Init Default Mode
+        # Card tracking
+        self.detection_cards = {}  # name -> DetectionCard
+        self.detection_images = {}  # name -> best crop image
+        
+        # *** ANTI-FLICKER: Detection tracker ***
+        self.detection_tracker = DetectionTracker(memory_frames=5, min_stable_frames=1)
+        
+        # UI Setup
+        self.setup_modern_ui()
+        
+        # Start
+        self.camera.start(0)
         self.switch_mode("pills")
         
         self.timer = QTimer()
-        self.timer.timeout.connect(self.update_logic)
-        self.timer.start(30) 
+        self.timer.timeout.connect(self.update_frame)
+        self.timer.start(33)
 
-    def init_ui(self):
-        self.central_widget = QWidget()
-        self.setCentralWidget(self.central_widget)
-        self.main_layout = QHBoxLayout(self.central_widget)
-        self.main_layout.setContentsMargins(0,0,0,0)
-
-        # --- LEFT: VIDEO ---
-        self.video_container = QWidget()
-        v_layout = QVBoxLayout(self.video_container)
-        self.lbl_video = QLabel("Initializing Camera...")
-        self.lbl_video.setAlignment(Qt.AlignCenter)
-        self.lbl_video.setStyleSheet("background-color: #000; border-right: 2px solid #333;")
-        v_layout.addWidget(self.lbl_video)
-        self.main_layout.addWidget(self.video_container, stretch=3)
-
-        # --- RIGHT: SIDEBAR ---
-        self.sidebar = QFrame()
-        self.sidebar.setFixedWidth(400)
-        self.sidebar.setStyleSheet("background-color: #252526;")
-        self.side_layout = QVBoxLayout(self.sidebar)
-        self.side_layout.setSpacing(20)
-
-        # 1. Mode Selection (Buttons)
-        grp_mode = QGroupBox("🎮 OPERATION MODE")
-        l_mode = QVBoxLayout(grp_mode)
+    def setup_modern_ui(self):
+        """Setup modern card-based interface"""
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QHBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
         
-        h_btns = QHBoxLayout()
+        # === LEFT: VIDEO PANEL ===
+        left_panel = QWidget()
+        left_panel.setStyleSheet("background-color: #f8f9fa;")
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(20, 20, 20, 20)
+        left_layout.setSpacing(15)
+        
+        # Header with gradient
+        header = QFrame()
+        header.setFixedHeight(100)
+        header.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #667eea, stop:1 #764ba2);
+                border-radius: 16px;
+            }
+        """)
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(25, 15, 25, 15)
+        header_layout.setSpacing(5)
+        
+        title = QLabel("AI SMART TECH")
+        title.setStyleSheet("""
+            color: white;
+            font-size: 32px;
+            font-weight: bold;
+            letter-spacing: 3px;
+        """)
+        
+        subtitle = QLabel("Vision Detection System")
+        subtitle.setStyleSheet("""
+            color: rgba(255,255,255,0.9);
+            font-size: 14px;
+            letter-spacing: 1px;
+        """)
+        
+        header_layout.addWidget(title)
+        header_layout.addWidget(subtitle)
+        left_layout.addWidget(header)
+        
+        # Mode Toggle
+        mode_frame = QFrame()
+        mode_frame.setFixedHeight(60)
+        mode_frame.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border-radius: 12px;
+            }
+        """)
+        mode_layout = QHBoxLayout(mode_frame)
+        mode_layout.setContentsMargins(15, 10, 15, 10)
+        mode_layout.setSpacing(10)
+        
+        mode_label = QLabel("Mode:")
+        mode_label.setStyleSheet("color: #666; font-size: 13px; font-weight: bold;")
+        
         self.btn_pills = QPushButton("💊 PILLS")
-        self.btn_pills.setCheckable(True)
-        self.btn_pills.setFixedHeight(50)
+        self.btn_pills.setFixedSize(120, 40)
+        self.btn_pills.setCursor(Qt.PointingHandCursor)
         self.btn_pills.clicked.connect(lambda: self.switch_mode("pills"))
         
         self.btn_boxes = QPushButton("📦 BOXES")
-        self.btn_boxes.setCheckable(True)
-        self.btn_boxes.setFixedHeight(50)
+        self.btn_boxes.setFixedSize(120, 40)
+        self.btn_boxes.setCursor(Qt.PointingHandCursor)
         self.btn_boxes.clicked.connect(lambda: self.switch_mode("boxes"))
         
-        h_btns.addWidget(self.btn_pills)
-        h_btns.addWidget(self.btn_boxes)
-        l_mode.addLayout(h_btns)
-        self.side_layout.addWidget(grp_mode)
+        mode_layout.addWidget(mode_label)
+        mode_layout.addWidget(self.btn_pills)
+        mode_layout.addWidget(self.btn_boxes)
+        mode_layout.addStretch()
+        
+        left_layout.addWidget(mode_frame)
+        
+        # Video Display
+        video_frame = QFrame()
+        video_frame.setStyleSheet("""
+            QFrame {
+                background-color: #000;
+                border: 3px solid #e0e0e0;
+                border-radius: 16px;
+            }
+        """)
+        video_layout = QVBoxLayout(video_frame)
+        video_layout.setContentsMargins(8, 8, 8, 8)
+        
+        self.lbl_video = QLabel("Initializing Camera...")
+        self.lbl_video.setAlignment(Qt.AlignCenter)
+        self.lbl_video.setMinimumSize(900, 600)
+        self.lbl_video.setStyleSheet("""
+            background-color: #000;
+            color: #666;
+            font-size: 16px;
+        """)
+        video_layout.addWidget(self.lbl_video)
+        
+        left_layout.addWidget(video_frame, stretch=1)
+        
+        # Status Bar
+        status_frame = QFrame()
+        status_frame.setFixedHeight(50)
+        status_frame.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border-radius: 12px;
+            }
+        """)
+        status_layout = QHBoxLayout(status_frame)
+        status_layout.setContentsMargins(20, 10, 20, 10)
+        
+        self.lbl_status = QLabel("● System Ready")
+        self.lbl_status.setStyleSheet("""
+            color: #4CAF50;
+            font-size: 14px;
+            font-weight: bold;
+        """)
+        
+        self.btn_clear = QPushButton("🔄 CLEAR SELECTION")
+        self.btn_clear.setFixedSize(150, 30)
+        self.btn_clear.setCursor(Qt.PointingHandCursor)
+        self.btn_clear.clicked.connect(self.clear_all_selections)
+        self.btn_clear.setStyleSheet("""
+            QPushButton {
+                background-color: #f5f5f5;
+                border: 2px solid #e0e0e0;
+                border-radius: 8px;
+                color: #666;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #e0e0e0;
+            }
+        """)
+        
+        status_layout.addWidget(self.lbl_status)
+        status_layout.addStretch()
+        status_layout.addWidget(self.btn_clear)
+        
+        left_layout.addWidget(status_frame)
+        
+        main_layout.addWidget(left_panel, stretch=6)
+        
+        # === RIGHT: CARDS PANEL ===
+        # === RIGHT: CARDS PANEL ===
+        right_panel = QFrame()
+        right_panel.setFixedWidth(420)
+        right_panel.setStyleSheet("""
+            QFrame { background-color: white; border-left: 3px solid #e0e0e0; }
+        """)
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(15, 15, 15, 15)
+        right_layout.setSpacing(12)
+        
+        # 1. Detection Header
+        detection_header = QFrame()
+        detection_header.setFixedHeight(55)
+        detection_header.setStyleSheet("background-color: #f5f5f5; border-radius: 10px;")
+        detection_header_layout = QHBoxLayout(detection_header)
+        detection_header_layout.setContentsMargins(15, 12, 15, 12)
+        
+        detection_title = QLabel("ยาที่ตรวจพบ")
+        detection_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #333;")
+        self.lbl_detection_count = QLabel("0 รายการ")
+        self.lbl_detection_count.setStyleSheet("font-size: 14px; font-weight: bold; color: #1976D2;")
+        
+        detection_header_layout.addWidget(detection_title)
+        detection_header_layout.addStretch()
+        detection_header_layout.addWidget(self.lbl_detection_count)
+        right_layout.addWidget(detection_header)
+        
+        # 2. Scrollable Cards Area (3-Column Grid)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setStyleSheet("""
+            QScrollArea { border: none; background-color: white; }
+            QScrollBar:vertical { border: none; background: #f5f5f5; width: 6px; border-radius: 3px; }
+            QScrollBar::handle:vertical { background: #ccc; border-radius: 3px; }
+        """)
+        
+        self.cards_container = QWidget()
+        self.cards_layout = QGridLayout(self.cards_container)
+        self.cards_layout.setSpacing(8)
+        self.cards_layout.setContentsMargins(3, 3, 3, 3)
+        self.cards_layout.setAlignment(Qt.AlignTop)
+        scroll_area.setWidget(self.cards_container)
+        
+        # 3. Summary List Panel
+        summary_frame = QFrame()
+        summary_frame.setStyleSheet("background-color: #f5f5f5; border-radius: 10px;")
+        summary_layout = QVBoxLayout(summary_frame)
+        summary_layout.setContentsMargins(15, 12, 15, 12)
+        
+        summary_title = QLabel("📋 รายการยาที่ตรวจพบ")
+        summary_title.setStyleSheet("font-size: 15px; font-weight: bold; color: #333;")
+        summary_layout.addWidget(summary_title)
+        
+        # สร้าง summary_text ก่อนจะไปตั้งค่า Height
+        self.summary_text = QLabel("ยังไม่พบยา")
+        self.summary_text.setStyleSheet("""
+            background-color: white; color: #333; font-size: 14px;
+            padding: 12px; border-radius: 8px; line-height: 1.8;
+        """)
+        self.summary_text.setWordWrap(True)
+        self.summary_text.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.summary_text.setMinimumHeight(120)
+        self.summary_text.setMaximumHeight(200)
+        
+        summary_layout.addWidget(self.summary_text)
+        
+        # 4. Settings Panel (Confidence Slider)
+        settings_frame = QFrame()
+        settings_frame.setFixedHeight(90)
+        settings_frame.setStyleSheet("background-color: #f5f5f5; border-radius: 10px;")
+        settings_layout = QVBoxLayout(settings_frame)
+        
+        conf_label = QLabel("Confidence Threshold")
+        conf_label.setStyleSheet("color: #666; font-size: 11px; font-weight: bold;")
+        
+        slider_layout = QHBoxLayout()
+        self.slider_conf = QSlider(Qt.Horizontal)
+        self.slider_conf.setRange(30, 95)
+        self.slider_conf.setValue(60)
+        self.slider_conf.valueChanged.connect(self.update_confidence_label)
+        
+        self.lbl_conf_value = QLabel("60%")
+        self.lbl_conf_value.setFixedWidth(40)
+        self.lbl_conf_value.setStyleSheet("font-weight: bold; color: #667eea;")
+        
+        slider_layout.addWidget(self.slider_conf)
+        slider_layout.addWidget(self.lbl_conf_value)
+        settings_layout.addWidget(conf_label)
+        settings_layout.addLayout(slider_layout)
 
-        # 2. Settings (Slider Only)
-        grp_set = QGroupBox("⚙️ SETTINGS")
-        l_set = QVBoxLayout(grp_set)
+        # --- จัดลำดับการวางใน Right Panel (Stretch คือหัวใจสำคัญ) ---
+        right_layout.addWidget(scroll_area, stretch=4)   # พื้นที่การ์ดใหญ่สุด
+        right_layout.addWidget(summary_frame, stretch=2) # พื้นที่สรุปเล็กลงมา
+        right_layout.addWidget(settings_frame, stretch=0) # ส่วนตั้งค่าไม่ต้องยืด
         
-        h_conf = QHBoxLayout()
-        h_conf.addWidget(QLabel("Detection Conf:"))
-        self.lbl_conf_val = QLabel("0.60")
-        self.lbl_conf_val.setStyleSheet("color: #00ff00; font-weight: bold;")
-        h_conf.addWidget(self.lbl_conf_val)
-        l_set.addLayout(h_conf)
+        main_layout.addWidget(right_panel)
+        # Apply global styles
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #f8f9fa;
+            }
+            QWidget {
+                font-family: 'Segoe UI', Arial, sans-serif;
+            }
+        """)
         
-        self.sl_conf = QSlider(Qt.Horizontal)
-        self.sl_conf.setRange(10, 95)
-        self.sl_conf.setValue(60) # Default 0.6
-        self.sl_conf.valueChanged.connect(lambda v: self.lbl_conf_val.setText(f"{v/100:.2f}"))
-        l_set.addWidget(self.sl_conf)
-        self.side_layout.addWidget(grp_set)
+        # Update mode buttons
+        self.update_mode_buttons()
 
-        # 3. Status / Preview Crop
-        grp_stat = QGroupBox("👁️ LIVE CROP (RAW)")
-        l_stat = QVBoxLayout(grp_stat)
-        self.lbl_preview = QLabel("Waiting...")
-        self.lbl_preview.setFixedSize(220, 220)
-        self.lbl_preview.setStyleSheet("border: 1px dashed #555; background: #111;")
-        self.lbl_preview.setAlignment(Qt.AlignCenter)
-        l_stat.addWidget(self.lbl_preview, 0, Qt.AlignCenter)
-        
-        self.lbl_status = QLabel("System Ready")
-        self.lbl_status.setWordWrap(True)
-        self.lbl_status.setStyleSheet("color: #aaa; font-size: 12px;")
-        l_stat.addWidget(self.lbl_status)
-        
-        self.side_layout.addWidget(grp_stat)
-        
-        # Spacer
-        self.side_layout.addStretch()
-        
-        # Version
-        lbl_ver = QLabel("VisionForge AI - Pure Crop v1.0")
-        lbl_ver.setAlignment(Qt.AlignCenter)
-        lbl_ver.setStyleSheet("color: #555;")
-        self.side_layout.addWidget(lbl_ver)
+    def update_mode_buttons(self):
+        """Update mode button styles"""
+        if self.current_mode == "pills":
+            self.btn_pills.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #667eea, stop:1 #764ba2);
+                    color: white;
+                    border: none;
+                    border-radius: 10px;
+                    font-size: 12px;
+                    font-weight: bold;
+                }
+            """)
+            self.btn_boxes.setStyleSheet("""
+                QPushButton {
+                    background-color: #f5f5f5;
+                    color: #666;
+                    border: 2px solid #e0e0e0;
+                    border-radius: 10px;
+                    font-size: 12px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #e0e0e0;
+                }
+            """)
+        else:
+            self.btn_boxes.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                        stop:0 #f093fb, stop:1 #f5576c);
+                    color: white;
+                    border: none;
+                    border-radius: 10px;
+                    font-size: 12px;
+                    font-weight: bold;
+                }
+            """)
+            self.btn_pills.setStyleSheet("""
+                QPushButton {
+                    background-color: #f5f5f5;
+                    color: #666;
+                    border: 2px solid #e0e0e0;
+                    border-radius: 10px;
+                    font-size: 12px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background-color: #e0e0e0;
+                }
+            """)
 
-        self.main_layout.addWidget(self.sidebar)
+    def update_confidence_label(self):
+        """Update confidence label"""
+        value = self.slider_conf.value()
+        self.lbl_conf_value.setText(f"{value}%")
 
-    # ================= LOGIC: AUTO SWITCH & LOAD =================
-    def switch_mode(self, mode):
+    def update_frame(self):
+        """Main update loop"""
+        frame = self.camera.get_frame()
+        if frame is None:
+            return
+        
+        current_time = time.time()
+        should_detect = (current_time - self.last_detection_time) >= self.detection_interval
+        
+        if should_detect:
+            self.last_detection_time = current_time
+            self.process_detection(frame)
+        else:
+            self.show_video(frame)
+
+    def process_detection(self, frame: np.ndarray):
+        """Process frame for detection - ไม่วาดกรอบ แต่แสดงใน cards ฝั่งขวา"""
+        display = frame.copy()
+        h, w = display.shape[:2]
+        conf = self.slider_conf.value() / 100.0
+        
+        try:
+            results = self.detector.model(frame, conf=conf, verbose=False)
+            raw_inventory = {}
+            detected_images = {}
+            detected_bboxes = {}
+            
+            for r in results:
+                if not hasattr(r, 'boxes'):
+                    continue
+                
+                for box in r.boxes:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
+                    
+                    if x2 - x1 < 20 or y2 - y1 < 20:
+                        continue
+                    
+                    # Extract crop
+                    pad = 10
+                    y1_p = max(0, y1 - pad)
+                    x1_p = max(0, x1 - pad)
+                    y2_p = min(h, y2 + pad)
+                    x2_p = min(w, x2 + pad)
+                    crop = frame[y1_p:y2_p, x1_p:x2_p]
+                    
+                    if crop.size == 0:
+                        continue
+                    
+                    # Recognize
+                    name, score = None, 0
+                    if self.arcface_model and self.db_manager:
+                        emb = self.compute_embedding(crop)
+                        if emb is not None:
+                            name, score = self.db_manager.search(emb)
+                    
+                    if name and score > conf:
+                        # Update raw inventory
+                        if name not in raw_inventory:
+                            raw_inventory[name] = 0
+                        raw_inventory[name] += 1
+                        
+                        # Store bbox
+                        detected_bboxes[name] = (x1, y1, x2, y2)
+                        
+                        # Store best image
+                        if name not in detected_images:
+                            detected_images[name] = crop
+            
+            # *** ANTI-FLICKER: ใช้ tracker เพื่อ smooth detection ***
+            self.detection_tracker.update(raw_inventory, detected_bboxes)
+            stable_inventory = self.detection_tracker.get_stable_detections()
+            
+            # Update cards ด้วย stable inventory
+            self.update_cards(stable_inventory, detected_images)
+            
+        except Exception as e:
+            pass
+        
+        self.show_video(display)
+
+    def update_cards(self, inventory: Dict[str, int], images: Dict[str, np.ndarray]):
+        """Update detection cards และ summary list"""
+        # Remove old cards
+        for name in list(self.detection_cards.keys()):
+            if name not in inventory:
+                card = self.detection_cards[name]
+                self.cards_layout.removeWidget(card)
+                card.deleteLater()
+                del self.detection_cards[name]
+                if name in self.detection_images:
+                    del self.detection_images[name]
+        
+        # Update/Add cards
+        row, col = 0, 0
+        for idx, (name, count) in enumerate(sorted(inventory.items(), key=lambda x: x[1], reverse=True)):
+            if name in self.detection_cards:
+                # Update existing card
+                card = self.detection_cards[name]
+                card.item_count = count
+                card.lbl_count.setText(f"×{count}")
+                
+                # Update image if new one available
+                if name in images:
+                    rgb = cv2.cvtColor(images[name], cv2.COLOR_BGR2RGB)
+                    h, w, c = rgb.shape
+                    qi = QImage(rgb.data, w, h, c * w, QImage.Format_RGB888)
+                    pixmap = QPixmap.fromImage(qi)
+                    card.set_image(pixmap)
+                    self.detection_images[name] = images[name]
+            else:
+                # Create new card
+                pixmap = None
+                if name in images:
+                    rgb = cv2.cvtColor(images[name], cv2.COLOR_BGR2RGB)
+                    h, w, c = rgb.shape
+                    qi = QImage(rgb.data, w, h, c * w, QImage.Format_RGB888)
+                    pixmap = QPixmap.fromImage(qi)
+                    self.detection_images[name] = images[name]
+                
+                card = DetectionCard(name, count, pixmap)
+                card.clicked = lambda n=name: self.on_card_clicked(n)
+                self.detection_cards[name] = card
+            
+            # Update selection state
+            card.set_selected(self.selected_item_name == name.lower())
+            
+            # Position in grid
+            row = idx // 3
+            col = idx % 3
+            self.cards_layout.addWidget(card, row, col)
+        
+        # Update count label
+        total = len(inventory)
+        self.lbl_detection_count.setText(f"{total} รายการ")
+        
+        # === UPDATE SUMMARY LIST ===
+        if inventory:
+            summary_lines = []
+            total_items = sum(inventory.values())
+            
+            # เรียงตามจำนวนมากไปน้อย
+            sorted_items = sorted(inventory.items(), key=lambda x: x[1], reverse=True)
+            
+            for name, count in sorted_items:
+                # ใช้ emoji indicator
+                if self.selected_item_name == name.lower():
+                    indicator = "✅"
+                    style = "font-weight: bold; color: #1976D2;"
+                else:
+                    indicator = "•"
+                    style = "font-weight: normal; color: #333;"
+                
+                # แสดงแบบตัวหนา อ่านง่าย
+                summary_lines.append(f'<div style="{style}">{indicator} <b>{name.upper()}</b>: {count} รายการ</div>')
+            
+            # แสดงยอดรวม
+            summary_lines.append('<div style="margin-top: 10px; border-top: 2px solid #ddd; padding-top: 10px;"></div>')
+            summary_lines.append(f'<div style="font-size: 16px; font-weight: bold; color: #1976D2;">รวมทั้งหมด: {total_items} รายการ</div>')
+            
+            summary_text = "".join(summary_lines)
+            self.summary_text.setText(summary_text)
+            self.summary_text.setStyleSheet("""
+                background-color: white;
+                color: #333;
+                font-size: 15px;
+                padding: 15px;
+                border-radius: 8px;
+                line-height: 2.0;
+            """)
+        else:
+            self.summary_text.setText('<div style="color: #999; font-style: italic; text-align: center;">ยังไม่พบยา</div>')
+            self.summary_text.setStyleSheet("""
+                background-color: white;
+                color: #999;
+                font-size: 15px;
+                padding: 15px;
+                border-radius: 8px;
+            """)
+
+
+    def on_card_clicked(self, name: str):
+        """Handle card click - TOGGLE selection"""
+        name_lower = name.lower()
+        
+        # Toggle: if already selected, deselect; otherwise select
+        if self.selected_item_name == name_lower:
+            # Deselect
+            self.selected_item_name = None
+            self.lbl_status.setText("● System Ready")
+            self.lbl_status.setStyleSheet("color: #4CAF50; font-size: 14px; font-weight: bold;")
+        else:
+            # Select
+            self.selected_item_name = name_lower
+            self.lbl_status.setText(f"● Tracking: {name.upper()}")
+            self.lbl_status.setStyleSheet("color: #2196F3; font-size: 14px; font-weight: bold;")
+        
+        # Update all cards
+        for card_name, card in self.detection_cards.items():
+            card.set_selected(self.selected_item_name == card_name.lower())
+
+    def clear_all_selections(self):
+        """Clear all selections"""
+        self.selected_item_name = None
+        self.lbl_status.setText("● System Ready")
+        self.lbl_status.setStyleSheet("color: #4CAF50; font-size: 14px; font-weight: bold;")
+        
+        for card in self.detection_cards.values():
+            card.set_selected(False)
+
+    def switch_mode(self, mode: str):
+        """Switch detection mode"""
         self.current_mode = mode
+        self.clear_all_selections()
+        self.update_mode_buttons()
         
-        # Update UI Buttons
-        if mode == "pills":
-            self.btn_pills.setChecked(True)
-            self.btn_boxes.setChecked(False)
-            self.btn_pills.setStyleSheet("background-color: #007acc; color: white;")
-            self.btn_boxes.setStyleSheet("")
-        else:
-            self.btn_pills.setChecked(False)
-            self.btn_boxes.setChecked(True)
-            self.btn_boxes.setStyleSheet("background-color: #d35400; color: white;")
-            self.btn_pills.setStyleSheet("")
-
-        print(f"🔄 Switching to: {mode.upper()}")
-        self.lbl_status.setText(f"Loading {mode.upper()} resources...")
-        QApplication.processEvents() # Force UI Update
-
-        # --- 1. Auto Load Database ---
-        self.load_auto_database(mode)
-
-        # --- 2. Auto Load YOLO (best.onnx) ---
-        self.load_auto_yolo()
-
-        # --- 3. Auto Load ArcFace (.pth) ---
-        # 🔥🔥 FIX HERE: โหลด Model ทั้ง 2 โหมด ไม่ปิดกั้น Boxes แล้ว 🔥🔥
-        self.load_auto_arcface()
+        # Clear all cards
+        for card in self.detection_cards.values():
+            self.cards_layout.removeWidget(card)
+            card.deleteLater()
+        self.detection_cards.clear()
+        self.detection_images.clear()
         
-        self.lbl_status.setText(f"✅ Mode: {mode.upper()} Active")
-
-    def load_auto_database(self, mode):
-        """Finds .db in data/{mode} automatically"""
-        db_folder = os.path.join(BASE_DIR, "data", mode)
-        if not os.path.exists(db_folder):
-            os.makedirs(db_folder, exist_ok=True)
-
-        # Find first .db file
-        db_files = [f for f in os.listdir(db_folder) if f.endswith(".db")]
+        # *** RESET TRACKER ***
+        self.detection_tracker = DetectionTracker(memory_frames=5, min_stable_frames=1)
         
-        if db_files:
-            target_db = os.path.join(db_folder, db_files[0])
-            print(f"📂 Found DB: {target_db}")
-        else:
-            target_db = os.path.join(db_folder, "default.db")
-            print(f"⚠️ No DB found, creating default: {target_db}")
+        self.load_resources(mode)
 
-        # Connect
+    def load_resources(self, mode: str):
+        """Load AI resources"""
+        self.lbl_status.setText(f"● Loading {mode.upper()}...")
+        self.lbl_status.setStyleSheet("color: #FF9800; font-size: 14px; font-weight: bold;")
+        
+        # Database
+        db_path = os.path.join(BASE_DIR, "data", mode)
+        os.makedirs(db_path, exist_ok=True)
+        db_files = [f for f in os.listdir(db_path) if f.endswith(".db")]
+        target_db = os.path.join(db_path, db_files[0]) if db_files else os.path.join(db_path, "default.db")
+        
         if self.db_manager:
-            try: self.db_manager.close()
-            except: pass
+            try:
+                self.db_manager.close()
+            except:
+                pass
         
         try:
             self.db_manager = DatabaseManager(target_db)
-            print(f"✅ DB Connected: {os.path.basename(target_db)}")
-        except Exception as e:
-            print(f"❌ DB Error: {e}")
+        except:
             self.db_manager = None
-
-    def load_auto_yolo(self):
-        """Finds best.onnx"""
-        possible_paths = [
-            os.path.join(BASE_DIR, "models", "best.onnx"),
-            os.path.join(BASE_DIR, "model_weights", "best.onnx"),
-            "best.onnx"
-        ]
-
-        found = False
-        for path in possible_paths:
-            if os.path.exists(path):
-                self.detector.load_model(path)
-                print(f"👁️ YOLO Loaded: {path}")
-                found = True
-                break
         
-        if not found:
-            print("❌ Error: 'best.onnx' not found")
-            self.lbl_status.setText("❌ Error: YOLO model missing")
-
-    def load_auto_arcface(self):
-        """Finds any .pth file"""
-        folder = os.path.join(BASE_DIR, "models")
-        if not os.path.exists(folder):
-            folder = os.path.join(BASE_DIR, "model_weights")
+        # YOLO
+        yolo_path = os.path.join(BASE_DIR, "models", "best.onnx")
+        if not os.path.exists(yolo_path):
+            yolo_path = os.path.join(BASE_DIR, "model_weights", "best.onnx")
         
-        if os.path.exists(folder):
-            pth_files = [f for f in os.listdir(folder) if f.endswith(".pth")]
-            if pth_files:
-                target_pth = os.path.join(folder, pth_files[0])
-                try:
-                    model = PillModel(num_classes=1000, model_name='convnext_small', embed_dim=512)
-                    ckpt = torch.load(target_pth, map_location=self.device)
-                    clean_dict = {k: v for k, v in ckpt.items() if not k.startswith('head')}
-                    model.load_state_dict(clean_dict, strict=False)
-                    model.to(self.device).eval()
-                    self.arcface_model = model
-                    print(f"🧠 ArcFace Loaded: {target_pth}")
-                except Exception as e:
-                    print(f"❌ ArcFace Error: {e}")
-            else:
-                 print("⚠️ No .pth file found for ArcFace")
-
-    # ================= LOGIC: MAIN LOOP =================
-    def update_logic(self):
-            frame = self.camera.get_frame()
-            if frame is None: return
-            
-            # --- ❌ จุดที่ทำให้เพี้ยน (เดิม) ---
-            # processed = self.processor.apply_filters(frame)
-            # display = processed.copy()
-            # best_box = self.detector.predict(processed, conf=conf) 
-            
-            # --- ✅ วิธีแก้ (ใหม่) ---
-            # ใช้ frame ต้นฉบับทำทุกอย่าง เพื่อให้ Coordinate ตรงกัน 100%
-            display = frame.copy() 
-            
-            # ถ้าอยากใส่ Filter ให้ใส่ที่ display เพื่อการแสดงผล
-            # แต่ตอน predict ให้ใช้ frame ดิบ หรือ display ที่ขนาดยังเท่า frame
-            # (ถ้า apply_filters ของคุณมีการย่อภาพ ห้ามใช้ภาพนั้นมา predict คู่กับการ crop frame)
-            
-            h, w = display.shape[:2]
-            conf = self.sl_conf.value() / 100.0
-            
-            # 🔥 CHANGE 1: Predict จาก frame โดยตรง (เพื่อให้ได้พิกัดตรงกับภาพจริง)
-            best_box = self.detector.predict(frame, conf=conf)
-            
-            identified_name = "WAITING..."
-            status_color = (100, 100, 100)
-
-            if best_box is not None:
-                x1, y1, x2, y2 = map(int, best_box.xyxy[0])
+        if os.path.exists(yolo_path):
+            try:
+                self.detector.load_model(yolo_path)
+            except:
+                pass
+        
+        # ArcFace
+        model_name = "best_pill.pth" if mode == "pills" else "best_boxes.pth"
+        model_path = os.path.join(BASE_DIR, "models", model_name)
+        if not os.path.exists(model_path):
+            model_path = os.path.join(BASE_DIR, "model_weights", model_name)
+        
+        if os.path.exists(model_path):
+            try:
+                model = PillModel(num_classes=1000, model_name='convnext_small', embed_dim=512)
+                ckpt = torch.load(model_path, map_location=self.device, weights_only=True)
+                clean_dict = {k: v for k, v in ckpt.items() if not k.startswith('head')}
+                model.load_state_dict(clean_dict, strict=False)
+                model.to(self.device).eval()
+                self.arcface_model = model
                 
-                # --- 🔥 PADDING Logic ---
-                pad = 15 
-                y1_p = max(0, y1 - pad)
-                x1_p = max(0, x1 - pad)
-                y2_p = min(h, y2 + pad)
-                x2_p = min(w, x2 + pad)
-                
-                # 🔥 CHANGE 2: ตัดจาก frame (ซึ่งตอนนี้พิกัด x1,y1 ตรงกันแล้ว)
-                raw_crop = frame[y1_p:y2_p, x1_p:x2_p]
-                
-                if raw_crop.size > 0:
-                    # แปลงเป็น BGRA
-                    rgba = cv2.cvtColor(raw_crop, cv2.COLOR_BGR2BGRA)
-                    
-                    self.best_crop_rgba = rgba
-                    self.show_preview(rgba)
-                    
-                    # --- RECOGNITION LOGIC ---
-                    if self.arcface_model is None:
-                        identified_name = "⚠️ NO MODEL"
-                        status_color = (0, 0, 255)
-                    elif self.db_manager is None:
-                        identified_name = "⚠️ NO DB"
-                        status_color = (0, 0, 255)
-                    else:
-                        self.current_embedding = self.compute_embedding(raw_crop)
-                        
-                        if self.current_embedding is not None:
-                            name, score = self.db_manager.search(self.current_embedding)
-                            if name:
-                                identified_name = f"{name.upper()} ({score:.2f})"
-                                status_color = (0, 255, 0)
-                            else:
-                                identified_name = "UNKNOWN"
-                                status_color = (0, 0, 255)
-                        else:
-                            identified_name = "EMBED ERR"
+                self.lbl_status.setText("● System Ready")
+                self.lbl_status.setStyleSheet("color: #4CAF50; font-size: 14px; font-weight: bold;")
+            except Exception as e:
+                self.arcface_model = None
+                self.lbl_status.setText("● Model Error")
+                self.lbl_status.setStyleSheet("color: #F44336; font-size: 14px; font-weight: bold;")
+        else:
+            self.arcface_model = None
+            self.lbl_status.setText("● Model Missing")
+            self.lbl_status.setStyleSheet("color: #F44336; font-size: 14px; font-weight: bold;")
 
-                # วาดลงบน display (ซึ่งขนาดเท่า frame)
-                cv2.rectangle(display, (x1, y1), (x2, y2), status_color, 2)
-
-            # --- DRAW OVERLAY ---
-            font = cv2.FONT_HERSHEY_SIMPLEX
-            font_scale = 1.0
-            thickness = 2
-            margin = 20
-
-            (text_w, text_h), _ = cv2.getTextSize(identified_name, font, font_scale, thickness)
-            text_x = w - text_w - margin
-            text_y = h - margin
-
-            cv2.rectangle(display, 
-                        (text_x - 10, text_y - text_h - 10), 
-                        (w - margin + 5, h - margin + 5), 
-                        (0, 0, 0), -1)
-            
-            cv2.putText(display, identified_name, (text_x, text_y), 
-                        font, font_scale, status_color, thickness, cv2.LINE_AA)
-
-            self.show_video(display)
-    def compute_embedding(self, bgr_img):
+    @torch.no_grad()
+    def compute_embedding(self, img: np.ndarray) -> Optional[np.ndarray]:
+        """Compute embedding"""
         try:
-            rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
-            t = self.arcface_transform(rgb).unsqueeze(0).to(self.device)
-            with torch.no_grad(): 
-                return self.arcface_model(t).cpu().numpy().flatten()
-        except: 
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            tensor = self.arcface_transform(rgb).unsqueeze(0).to(self.device)
+            embedding = self.arcface_model(tensor).cpu().numpy().flatten()
+            
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
+            
+            return embedding
+        except:
             return None
 
-    def show_video(self, img):
-        h, w, c = img.shape
-        qi = QImage(img.data, w, h, c*w, QImage.Format_RGB888).rgbSwapped()
-        self.lbl_video.setPixmap(QPixmap.fromImage(qi).scaled(
-            self.lbl_video.size(), Qt.KeepAspectRatio))
+    def show_video(self, frame: np.ndarray):
+        """Display video"""
+        try:
+            h, w, c = frame.shape
+            qi = QImage(frame.data, w, h, c * w, QImage.Format_RGB888).rgbSwapped()
+            pixmap = QPixmap.fromImage(qi)
+            scaled = pixmap.scaled(self.lbl_video.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.lbl_video.setPixmap(scaled)
+        except:
+            pass
+
+    def closeEvent(self, event):
+        """Cleanup"""
+        try:
+            self.camera.stop()
+            if self.db_manager:
+                self.db_manager.close()
+        except:
+            pass
+        event.accept()
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setFont(QFont("Segoe UI", 10))
     
-    def show_preview(self, img):
-        h, w, c = img.shape
-        fmt = QImage.Format_RGBA8888 if c == 4 else QImage.Format_RGB888
-        qi = QImage(img.data, w, h, c*w, fmt).rgbSwapped()
-        self.lbl_preview.setPixmap(QPixmap.fromImage(qi).scaled(
-            self.lbl_preview.size(), Qt.KeepAspectRatio))
-        
-    def apply_styles(self):
-        self.setStyleSheet("""
-            QMainWindow { background-color: #1e1e1e; }
-            QWidget { color: #f0f0f0; font-family: 'Segoe UI'; font-size: 14px; }
-            QGroupBox { border: 1px solid #444; margin-top: 10px; padding-top: 15px; font-weight: bold; }
-            QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; padding: 0 5px; }
-            QPushButton { background-color: #444; border-radius: 5px; font-weight: bold; }
-            QPushButton:hover { background-color: #555; }
-        """)
+    window = ModernVisionStation()
+    window.show()
+    
+    sys.exit(app.exec())
+
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    w = AdminStation()
-    w.show()
-    sys.exit(app.exec())
+    main()
