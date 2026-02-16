@@ -2,10 +2,23 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import timm 
+import timm
 
 # ---------------------------------------------------------
-# 2. ArcFace Head (ยกมาจาก architecture.py เดิมเป๊ะๆ)
+# 1. Focal Loss (ใช้ตอนเทรน แต่ใส่ไว้กัน Error Import)
+# ---------------------------------------------------------
+class FocalLoss(nn.Module):
+    def __init__(self, gamma=2.0, alpha=0.25):
+        super().__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+    def forward(self, logits, targets):
+        ce = F.cross_entropy(logits, targets, reduction='none')
+        pt = torch.exp(-ce)
+        return (self.alpha * (1 - pt)**self.gamma * ce).mean()
+
+# ---------------------------------------------------------
+# 2. ArcFace Head (หัวใจสำคัญของการวัดระยะห่าง)
 # ---------------------------------------------------------
 class ArcMarginProduct(nn.Module):
     def __init__(self, in_features, out_features, s=30.0, m=0.5):
@@ -30,10 +43,10 @@ class ArcMarginProduct(nn.Module):
         return output
 
 # ---------------------------------------------------------
-# 3. PillModel (Main Class)
+# 3. PillModel (ตัวหลักที่เรียกใช้)
 # ---------------------------------------------------------
 class PillModel(nn.Module):
-    def __init__(self, num_classes=1000, model_name='convnext_small', embed_dim=512, dropout=0.0):
+    def __init__(self, num_classes, model_name='convnext_small', embed_dim=512, dropout=0.0):
         super().__init__()
         # Load Pretrained Backbone (timm)
         self.backbone = timm.create_model(model_name, pretrained=True, num_classes=0)
@@ -60,9 +73,10 @@ class PillModel(nn.Module):
         # 2. Embedding (Vector 512)
         emb = self.bn_emb(self.fc(feat))
         
-        # 3. Logic แยกโหมด
+        # 3. Logic แยกโหมด (สำคัญมาก!)
         if labels is not None:
+            # Training Mode: Return Loss/Logits
             return self.head(emb, labels)
         
-        # Inference Mode: Return Vector 🔥
+        # Inference/Standalone Mode: Return Vector 🔥
         return emb
