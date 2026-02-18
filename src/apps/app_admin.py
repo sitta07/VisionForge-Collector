@@ -4,7 +4,7 @@ import time
 import cv2
 import numpy as np
 import torch
-import subprocess  # <--- [1] เพิ่ม subprocess เพื่อยิงคำสั่ง Linux
+import subprocess
 from torchvision import transforms
 
 # --- 📦 AI Libs ---
@@ -52,18 +52,21 @@ except ImportError as e:
         def close(self): pass
         def search(self, v): return None, 0.0
         def get_stats(self): return []
+        def add_entry(self, n, v, p): pass
+        def delete_class(self, n): pass
     class PillModel:
         def __init__(self, **k): pass
         def load_state_dict(self, d, strict): pass
         def to(self, d): return self
         def eval(self): pass
+        def __call__(self, x): return torch.randn(1, 512) # Mock output
 
 os.environ["QT_LOGGING_RULES"] = "qt.text.font.db=false"
 
 class AdminStation(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VisionForge: Admin Station (Auto Zoom Edition)")
+        self.setWindowTitle("VisionForge: Admin Station (Auto Zoom & Model Edition)")
         self.resize(1600, 950)
 
         # 1. Hardware & AI
@@ -96,7 +99,7 @@ class AdminStation(QMainWindow):
         self.init_ui()
         self.camera.start(0)
         
-        # Init Default (Will trigger auto zoom)
+        # Init Default (Will trigger auto zoom & model load)
         self.switch_mode("pills")
         
         self.timer = QTimer()
@@ -156,7 +159,7 @@ class AdminStation(QMainWindow):
 
         l_sys.addWidget(self.create_line())
 
-        # YOLO Confidence Slider
+        # --- YOLO Confidence Slider ---
         h_conf = QHBoxLayout()
         h_conf.addWidget(QLabel("Detection Conf:"))
         self.lbl_conf_val = QLabel("0.60")
@@ -165,9 +168,23 @@ class AdminStation(QMainWindow):
         
         self.sl_conf = QSlider(Qt.Horizontal)
         self.sl_conf.setRange(10, 95)
-        self.sl_conf.setValue(60)
+        self.sl_conf.setValue(65)
         self.sl_conf.valueChanged.connect(lambda v: self.lbl_conf_val.setText(f"{v/100:.2f}"))
         l_sys.addWidget(self.sl_conf)
+
+        # --- [NEW] Recognition Accuracy Slider ---
+        h_rec = QHBoxLayout()
+        h_rec.addWidget(QLabel("Rec. Accuracy:"))
+        self.lbl_rec_val = QLabel("0.60") # Default Label
+        h_rec.addWidget(self.lbl_rec_val)
+        l_sys.addLayout(h_rec)
+
+        self.sl_rec = QSlider(Qt.Horizontal)
+        self.sl_rec.setRange(10, 99) # Range 0.10 - 0.99
+        self.sl_rec.setValue(60)     # Default Value 0.60
+        self.sl_rec.valueChanged.connect(lambda v: self.lbl_rec_val.setText(f"{v/100:.2f}"))
+        l_sys.addWidget(self.sl_rec)
+        # -----------------------------------------
 
         self.side_layout.addWidget(grp_sys)
 
@@ -267,7 +284,7 @@ class AdminStation(QMainWindow):
         self.current_config = MODE_PATHS[mode]
         print(f"🔄 Switching to: {mode.upper()}")
 
-        # 🔥 [2] AUTO ZOOM LOGIC (NO SLIDER)
+        # 1. AUTO ZOOM LOGIC
         if mode == "pills":
             print("🔍 Auto Zoom: Setting to 60 (Pills)")
             self.set_hardware_zoom(60)
@@ -275,9 +292,8 @@ class AdminStation(QMainWindow):
             print("🔍 Auto Zoom: Setting to 50 (Boxes)")
             self.set_hardware_zoom(50)
 
-        # 1. Database
+        # 2. Database
         db_folder = os.path.join(BASE_DIR, "data", mode)
-        # Handle cases where config might not have 'db' key if mocking
         db_name = self.current_config.get("db", f"{mode}.db") 
         default_db_name = os.path.basename(db_name)
         
@@ -298,7 +314,7 @@ class AdminStation(QMainWindow):
             self.combo_db.addItem(default_db_name)
             self.combo_db.blockSignals(False)
         
-        # 2. YOLO
+        # 3. YOLO
         weights_folder = os.path.join(BASE_DIR, "model_weights")
         if not os.path.exists(weights_folder): 
             weights_folder = os.path.join(BASE_DIR, "models")
@@ -306,26 +322,32 @@ class AdminStation(QMainWindow):
         default_yolo = os.path.basename(self.current_config.get("yolo_model", "best.onnx"))
         self.populate_dropdown(self.combo_yolo, weights_folder, [".pt", ".onnx"], default_yolo)
         
-        # 3. ArcFace
+        # 4. [UPDATED] Auto ArcFace Selection
         if mode == "pills":
-            target_model = "best_pill.pth"
+            target_model = "best_pills.pth" # ใช้โมเดล pills
         else:
-            target_model = "best_boxes.pth"
+            target_model = "best_boxes.pth" # ใช้โมเดล boxes
             
         print(f"🎯 Target ArcFace: {target_model}")
         self.populate_dropdown(self.combo_arcface, weights_folder, [".pth"], target_model)
 
-        # 4. Trigger Load
+        # Force load the target model directly
+        full_model_path = os.path.join(weights_folder, target_model)
+        if os.path.exists(full_model_path):
+            self.load_arcface_model(full_model_path)
+        else:
+            print(f"⚠️ Warning: Auto-load model '{target_model}' not found in {weights_folder}")
+
+        # 5. Trigger Other Loads
         self.on_db_change(self.combo_db.currentText())
         self.on_yolo_change(self.combo_yolo.currentText())
-        self.on_arcface_change(self.combo_arcface.currentText())
+        # Note: We already loaded arcface manually above, so we don't need to trigger on_arcface_change here
         
         self.input_name.clear()
         self.lbl_name_status.setText("")
 
-    # --- [3] Helper for Hardware Zoom ---
+    # --- Hardware Zoom Helper ---
     def set_hardware_zoom(self, value):
-        # สั่ง v4l2-ctl ตรงนี้เลย
         cmd = ["v4l2-ctl", "-d", "/dev/video0", "--set-ctrl", f"zoom_absolute={value}"]
         try:
             subprocess.run(cmd, check=False)
@@ -394,7 +416,6 @@ class AdminStation(QMainWindow):
             frame = self.camera.get_frame()
             if frame is None: return
             
-            # ใช้ frame ต้นฉบับเพื่อความแม่นยำ
             display = frame.copy()
             self.processor.draw_crosshair(display)
 
@@ -403,7 +424,6 @@ class AdminStation(QMainWindow):
             # 3. ตรวจจับ
             conf = self.sl_conf.value() / 100.0
             
-            # Predict จาก frame ต้นฉบับ
             best_box = self.detector.predict(frame, conf=conf)
             
             self.best_crop_rgba = None
@@ -413,14 +433,12 @@ class AdminStation(QMainWindow):
             if best_box is not None:
                 x1, y1, x2, y2 = map(int, best_box.xyxy[0])
                 
-                # Padding Logic
                 pad = 15
                 y1_p = max(0, y1 - pad)
                 x1_p = max(0, x1 - pad)
                 y2_p = min(h, y2 + pad)
                 x2_p = min(w, x2 + pad)
 
-                # ตัดภาพ
                 raw_crop = frame[y1_p:y2_p, x1_p:x2_p]
                 
                 if raw_crop.size > 0:
@@ -430,13 +448,17 @@ class AdminStation(QMainWindow):
                     if not self.recording_active:
                         self.show_preview(rgba)
                     
-                    # --- AI Recognition ---
+                    # --- AI Recognition Logic ---
                     if self.arcface_model:
                         self.current_embedding = self.compute_embedding(raw_crop)
                         
                         if self.current_embedding is not None and self.db_manager:
                             name, score = self.db_manager.search(self.current_embedding)
-                            if name:
+                            
+                            # [UPDATED] Check against Slider Value
+                            rec_threshold = self.sl_rec.value() / 100.0
+                            
+                            if name and score >= rec_threshold:
                                 identified_name = f"{name.upper()} ({score:.2f})"
                                 status_color = (0, 255, 0)
                                 cv2.putText(display, f"{name} ({score:.2f})", (x1, y2 + 25),
@@ -444,7 +466,9 @@ class AdminStation(QMainWindow):
                             else:
                                 identified_name = "UNKNOWN"
                                 status_color = (0, 0, 255)
-                                cv2.putText(display, "Unknown", (x1, y2 + 25),
+                                # Show score even if unknown for debugging
+                                display_score = f"{score:.2f}" if score else "0.00"
+                                cv2.putText(display, f"Unknown ({display_score})", (x1, y2 + 25),
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
                                     
                     if self.recording_active:

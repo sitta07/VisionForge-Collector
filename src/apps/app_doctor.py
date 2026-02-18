@@ -90,7 +90,7 @@ FONT  = "Plus Jakarta Sans"
 MONO  = "IBM Plex Mono"
 R     = "12px"
 R_LG  = "16px"
-CONF  = 0.60
+CONF  = 0.30
 
 # Pre-build common style strings once (avoid repeated f-string eval)
 _CARD_NAME_NORMAL = f"color:{P['ink_2']};font-family:'{FONT}';font-size:12px;font-weight:700;letter-spacing:0.5px;"
@@ -987,23 +987,13 @@ class VisionStation(QMainWindow):
             # print(f"🔭 Hardware Zoom set to: {value}") 
         except Exception:
             pass # Silent fail (กรณีรันบน Windows หรือไม่มี Driver)
-
     def switch_mode(self, mode: str):
         self.current_mode = mode
-        
-        # 🔥 [AUTO ZOOM LOGIC]
-        # Pills = 60 | Boxes = 50
-        target_zoom = 60 if mode == "pills" else 50
-        self._set_hardware_zoom(target_zoom)
-
         self.clear_all_selections()
         self._update_mode_btns()
-        
         mode_th = "ยาเม็ด" if mode == "pills" else "กล่องยา"
         self.mode_tag.setText(f"MODE: {'PILLS' if mode == 'pills' else 'BOXES'}")
         self.lbl_action_mode.setText(f"{mode_th} · ระบบพร้อม")
-        
-        # Clear UI & Cache
         for card in self.detection_cards.values():
             self.cards_layout.removeWidget(card)
             card.deleteLater()
@@ -1011,8 +1001,6 @@ class VisionStation(QMainWindow):
         self.detection_images.clear()
         self._last_inventory.clear()
         self._embed_cache.clear()
-        
-        # Reset Tracker & Load AI
         self.tracker = DetectionTracker()
         self._load_resources(mode)
 
