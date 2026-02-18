@@ -4,6 +4,7 @@ import time
 import cv2
 import numpy as np
 import torch
+import subprocess  # <--- [1] เพิ่ม subprocess เพื่อยิงคำสั่ง Linux
 from torchvision import transforms
 
 # --- 📦 AI Libs ---
@@ -21,8 +22,10 @@ from PySide6.QtGui import QImage, QPixmap
 
 # --- 🔌 Core Logic ---
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
-from src.core.config import MODE_PATHS, BASE_DIR
+
+# Try Import Logic
 try:
+    from src.core.config import MODE_PATHS, BASE_DIR
     from src.core.camera import CameraManager
     from src.core.detector import ObjectDetector
     from src.core.image_utils import ImageProcessor
@@ -30,14 +33,37 @@ try:
     from src.model_arch.pill_model import PillModel 
 except ImportError as e:
     print(f"⚠️ Core Import Error: {e}")
-    sys.exit(1)
+    # Mock classes for standalone testing if needed
+    BASE_DIR = os.getcwd()
+    MODE_PATHS = {
+        "pills": {"raw_dir": "./data/pills", "yolo_model": "yolov8n.pt", "db": "pills.db"},
+        "boxes": {"raw_dir": "./data/boxes", "yolo_model": "yolov8n.pt", "db": "boxes.db"}
+    }
+    class CameraManager:
+        def start(self, id): pass
+        def get_frame(self): return np.zeros((480, 640, 3), dtype=np.uint8)
+    class ObjectDetector:
+        def load_model(self, p): pass
+        def predict(self, i, conf): return None
+    class ImageProcessor:
+        def draw_crosshair(self, i): pass
+    class DatabaseManager:
+        def __init__(self, p): self.conn = None
+        def close(self): pass
+        def search(self, v): return None, 0.0
+        def get_stats(self): return []
+    class PillModel:
+        def __init__(self, **k): pass
+        def load_state_dict(self, d, strict): pass
+        def to(self, d): return self
+        def eval(self): pass
 
 os.environ["QT_LOGGING_RULES"] = "qt.text.font.db=false"
 
 class AdminStation(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("VisionForge: Admin Station (Specific Models)")
+        self.setWindowTitle("VisionForge: Admin Station (Auto Zoom Edition)")
         self.resize(1600, 950)
 
         # 1. Hardware & AI
@@ -70,7 +96,7 @@ class AdminStation(QMainWindow):
         self.init_ui()
         self.camera.start(0)
         
-        # Init Default
+        # Init Default (Will trigger auto zoom)
         self.switch_mode("pills")
         
         self.timer = QTimer()
@@ -241,9 +267,19 @@ class AdminStation(QMainWindow):
         self.current_config = MODE_PATHS[mode]
         print(f"🔄 Switching to: {mode.upper()}")
 
+        # 🔥 [2] AUTO ZOOM LOGIC (NO SLIDER)
+        if mode == "pills":
+            print("🔍 Auto Zoom: Setting to 60 (Pills)")
+            self.set_hardware_zoom(60)
+        elif mode == "boxes":
+            print("🔍 Auto Zoom: Setting to 50 (Boxes)")
+            self.set_hardware_zoom(50)
+
         # 1. Database
         db_folder = os.path.join(BASE_DIR, "data", mode)
-        default_db_name = os.path.basename(self.current_config["db"])
+        # Handle cases where config might not have 'db' key if mocking
+        db_name = self.current_config.get("db", f"{mode}.db") 
+        default_db_name = os.path.basename(db_name)
         
         if not os.path.exists(db_folder):
             os.makedirs(db_folder, exist_ok=True)
@@ -270,16 +306,13 @@ class AdminStation(QMainWindow):
         default_yolo = os.path.basename(self.current_config.get("yolo_model", "best.onnx"))
         self.populate_dropdown(self.combo_yolo, weights_folder, [".pt", ".onnx"], default_yolo)
         
-        # 3. ArcFace (🔥 FIXED: Specific Model Selection)
-        # -----------------------------------------------------------
+        # 3. ArcFace
         if mode == "pills":
             target_model = "best_pill.pth"
         else:
             target_model = "best_boxes.pth"
             
         print(f"🎯 Target ArcFace: {target_model}")
-        
-        # Populate and force select
         self.populate_dropdown(self.combo_arcface, weights_folder, [".pth"], target_model)
 
         # 4. Trigger Load
@@ -289,6 +322,15 @@ class AdminStation(QMainWindow):
         
         self.input_name.clear()
         self.lbl_name_status.setText("")
+
+    # --- [3] Helper for Hardware Zoom ---
+    def set_hardware_zoom(self, value):
+        # สั่ง v4l2-ctl ตรงนี้เลย
+        cmd = ["v4l2-ctl", "-d", "/dev/video0", "--set-ctrl", f"zoom_absolute={value}"]
+        try:
+            subprocess.run(cmd, check=False)
+        except Exception as e:
+            print(f"⚠️ Zoom Warning: Could not set hardware zoom ({e})")
 
     # --- Dropdown Handlers ---
     def on_db_change(self, fname):
