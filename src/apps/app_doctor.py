@@ -90,7 +90,7 @@ FONT  = "Plus Jakarta Sans"
 MONO  = "IBM Plex Mono"
 R     = "12px"
 R_LG  = "16px"
-CONF  = 0.30
+CONF  = 0.8
 
 # Pre-build common style strings once (avoid repeated f-string eval)
 _CARD_NAME_NORMAL = f"color:{P['ink_2']};font-family:'{FONT}';font-size:12px;font-weight:700;letter-spacing:0.5px;"
@@ -359,7 +359,7 @@ class VisionStation(QMainWindow):
         self._embed_cache:    Dict[str, np.ndarray] = {}  # hash→embedding
         self._embed_cache_max = 256
         # ──────────────────────────────────────────────────────────
-
+        self.latest_boxes: list = []
         self._build_ui()
         self.camera.start(0)
         self.switch_mode("pills")
@@ -786,7 +786,12 @@ class VisionStation(QMainWindow):
         if self._detect_future is None or not self._detect_future.done():
             return
         try:
-            inventory, images = self._detect_future.result()
+            # [NEW] Unpack ค่า boxes ออกมาด้วย
+            inventory, images, boxes = self._detect_future.result()
+            
+            # [NEW] อัปเดตตัวแปร Global เพื่อให้ _show_video เอาไปวาด
+            self.latest_boxes = boxes
+            
         except Exception:
             return
         finally:
@@ -799,7 +804,7 @@ class VisionStation(QMainWindow):
 
         self.tracker.update(
             {k: v for k, v in inventory.items()},
-            {}  # bboxes already resolved inside worker
+            {}  # bboxes (handled visually via latest_boxes now)
         )
         stable = self.tracker.get_stable()
         self._update_cards(stable, images)
@@ -811,6 +816,8 @@ class VisionStation(QMainWindow):
         """Pure detection — no Qt calls allowed here."""
         h, w = frame.shape[:2]
         raw, imgs = {}, {}
+        boxes = []  # [NEW] สร้าง list เก็บข้อมูล Box
+
         try:
             results = self.detector.model(frame, conf=CONF, verbose=False)
             for r in results:
@@ -820,23 +827,38 @@ class VisionStation(QMainWindow):
                     x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
                     if (x2 - x1) < 20 or (y2 - y1) < 20:
                         continue
+                    
                     p = 10
                     crop = frame[max(0, y1-p):min(h, y2+p),
                                  max(0, x1-p):min(w, x2+p)]
+                    
                     if crop.size == 0:
                         continue
+                        
                     name, score = None, 0
                     if self.arcface_model and self.db_manager:
                         emb = self._embed_cached(crop)
                         if emb is not None:
                             name, score = self.db_manager.search(emb)
+                    
                     if name and score > CONF:
                         raw[name] = raw.get(name, 0) + 1
+                        # เก็บภาพ crop แค่ใบเดียวต่อประเภท (ตาม logic เดิม)
                         if name not in imgs:
                             imgs[name] = crop
+                        
+                        # [NEW] เก็บพิกัด Box ทุกอันที่เจอ
+                        boxes.append({
+                            "coords": (x1, y1, x2, y2),
+                            "name": name,
+                            "score": score
+                        })
+                        
         except Exception:
             pass
-        return raw, imgs
+        
+        # [NEW] Return boxes เพิ่มเป็นตัวที่ 3
+        return raw, imgs, boxes
 
     # ───────────────────────────────────────────────────────
     def _embed_cached(self, img: np.ndarray) -> Optional[np.ndarray]:
@@ -1021,7 +1043,7 @@ class VisionStation(QMainWindow):
         except: self.db_manager = None
 
         for base in ["models", "model_weights"]:
-            p = os.path.join(BASE_DIR, base, "best.onnx")
+            p = os.path.join(BASE_DIR, base, "best_doctor.onnx")
             if os.path.exists(p):
                 try: self.detector.load_model(p)
                 except: pass
@@ -1061,6 +1083,31 @@ class VisionStation(QMainWindow):
 
     def _show_video(self, frame: np.ndarray):
         try:
+            # [NEW] วาด Bounding Box ก่อนแปลงภาพ
+            if hasattr(self, 'latest_boxes') and self.latest_boxes:
+                # สีเขียว neon ตามธีม (BGR format)
+                color_bgr = (106, 223, 26) 
+                
+                for item in self.latest_boxes:
+                    x1, y1, x2, y2 = item['coords']
+                    name = item['name']
+                    
+                    # 1. วาดกรอบสี่เหลี่ยม (Line thickness = 2)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color_bgr, 2)
+                    
+                    # 2. วาดป้ายชื่อ (Background Filled)
+                    label = name.upper()
+                    font_scale = 0.5
+                    font_thick = 1
+                    (w_text, h_text), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, font_thick)
+                    
+                    # วาดพื้นหลังป้ายชื่อ (ให้เลยขึ้นไปด้านบนกรอบนิดหน่อย)
+                    cv2.rectangle(frame, (x1, y1 - 22), (x1 + w_text + 10, y1), color_bgr, -1)
+                    
+                    # วาดตัวหนังสือสีเข้ม (Dark Grey) เพื่อให้อ่านง่ายบนพื้นเขียว
+                    cv2.putText(frame, label, (x1 + 5, y1 - 6), 
+                                cv2.FONT_HERSHEY_SIMPLEX, font_scale, (30, 30, 30), font_thick, cv2.LINE_AA)
+
             h, w, c = frame.shape
             # Use Format_BGR888 directly — skip rgbSwapped() allocation
             qi = QImage(frame.data, w, h, c * w, QImage.Format_BGR888)
@@ -1069,7 +1116,8 @@ class VisionStation(QMainWindow):
                     self.lbl_video.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
                 )
             )
-        except: pass
+        except Exception: 
+            pass
 
     def closeEvent(self, event):
         self._vtimer.stop()

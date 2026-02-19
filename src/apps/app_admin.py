@@ -400,13 +400,38 @@ class AdminStation(QMainWindow):
 
     def load_arcface_model(self, path):
         try:
-            model = PillModel(num_classes=1000, model_name='convnext_small', embed_dim=512)
+            model = PillModel(
+    num_classes=1000,  # เลขอะไรก็ได้ เพราะ Head ไม่ได้ใช้
+    model_name='convnext_small', 
+    embed_dim=512,     # ต้องตรงกับตอนเทรน
+    use_cbam=False     # ปิดเพื่อให้โหลด Weight เก่าได้
+)
             ckpt = torch.load(path, map_location=self.device)
-            clean_dict = {k: v for k, v in ckpt.items() if not k.startswith('head')}
-            model.load_state_dict(clean_dict, strict=False)
+            
+            # --- 🔧 จุดแก้: ปรับ Key ให้ตรงกัน (Handle DataParallel save) ---
+            clean_dict = {}
+            for k, v in ckpt.items():
+                # ตัด head ออกตามเดิม
+                if k.startswith('head'): continue
+                
+                # แก้ชื่อ key ถ้ามี module. นำหน้า (มักเกิดตอนเทรนด้วยหลาย GPU)
+                new_k = k.replace("module.", "") 
+                clean_dict[new_k] = v
+            # -----------------------------------------------------------
+
+            # โหลดและเช็คว่า Key หายไปเยอะไหม
+            missing, unexpected = model.load_state_dict(clean_dict, strict=False)
+            
+            print(f"🧠 Loading Model: {os.path.basename(path)}")
+            if len(missing) > 0:
+                print(f"⚠️ Warning: Missing Keys ({len(missing)}): {missing[:5]} ...")
+                # ถ้า Missing เยอะแสดงว่าโมเดลเป็น Random -> ต้องแก้ชื่อ Key ให้ตรง
+            else:
+                print("✅ Model Weights Loaded Perfectly!")
+
             model.to(self.device).eval()
             self.arcface_model = model
-            print(f"🧠 ArcFace Ready: {os.path.basename(path)}")
+            
         except Exception as e:
             print(f"❌ ArcFace Failed: {e}")
 
@@ -587,13 +612,19 @@ class AdminStation(QMainWindow):
         print(f"✅ Saved to {self.current_mode} DB: {name}")
 
     def compute_embedding(self, bgr_img):
-        try:
-            rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
-            t = self.arcface_transform(rgb).unsqueeze(0).to(self.device)
-            with torch.no_grad(): 
-                return self.arcface_model(t).cpu().numpy().flatten()
-        except: 
-            return None
+            try:
+                rgb = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
+                t = self.arcface_transform(rgb).unsqueeze(0).to(self.device)
+                
+                with torch.no_grad(): 
+                    # --- แก้ตรงนี้: เพิ่ม F.normalize ---
+                    emb = self.arcface_model(t)
+                    emb = torch.nn.functional.normalize(emb, p=2, dim=1) # <--- สำคัญมาก!
+                    return emb.cpu().numpy().flatten()
+                    # ---------------------------------
+            except Exception as e: 
+                print(f"Embedding Error: {e}")
+                return None
 
     def refresh_analytics(self):
         if not self.db_manager: 
