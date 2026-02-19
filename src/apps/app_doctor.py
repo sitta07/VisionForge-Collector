@@ -612,7 +612,6 @@ class VisionStation(QMainWindow):
         finally:
             self._detect_future = None
 
-        # 🔥 [SENIOR FIX]: ให้อัปเดต Tracker เสมอ! ห้าม return หนี
         # เพื่อให้ระบบนับถอยหลังและ "ลืม" ของที่หายไปจากหน้าจอได้
         self.tracker.update(inventory, {})
         stable = self.tracker.get_stable()
